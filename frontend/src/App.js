@@ -7,7 +7,8 @@ import MobileNavBar from './components/MobileNavBar';
 import Home from './components/Home';
 import DrawingModal from './components/DrawingModal';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
-import { AuthProvider } from './context/AuthContext';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { SocketProvider } from './context/SocketContext';
 
 const ThemeToggle = () => {
     const { isDark, toggleTheme } = useTheme();
@@ -36,6 +37,7 @@ const AppContent = () => {
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
     const [isDrawingModalOpen, setIsDrawingModalOpen] = useState(false);
     const [uploading, setUploading] = useState(false);
+    const { token } = useAuth();
 
     useEffect(() => {
         const handleResize = () => {
@@ -59,28 +61,30 @@ const AppContent = () => {
     };
 
     const handleDrawingSave = async (drawingFile) => {
+        if (!token) {
+            console.error('Authentication required');
+            return;
+        }
+
         setUploading(true);
         const formData = new FormData();
         formData.append('file', drawingFile);
 
         try {
-            const response = await fetch(`http://localhost:3001/upload/${currentRoom}`, {
+            const response = await fetch(`http://localhost:3001/api/upload/${currentRoom || 'home'}`, {
                 method: 'POST',
                 body: formData,
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
             });
 
-            const text = await response.text();
-            let data;
-            try {
-                data = JSON.parse(text);
-            } catch (e) {
-                throw new Error('Upload failed: ' + text);
-            }
-
             if (!response.ok) {
-                throw new Error(data.error || 'Upload failed');
+                const errorText = await response.text();
+                throw new Error(errorText);
             }
 
+            const data = await response.json();
             console.log('Upload successful!', data);
             setIsDrawingModalOpen(false);
         } catch (error) {
@@ -205,11 +209,13 @@ const App = () => {
     return (
         <ThemeProvider>
             <AuthProvider>
-                <AppContent 
-                    isDrawingModalOpen={isDrawingModalOpen}
-                    onDrawingModalClose={() => setIsDrawingModalOpen(false)}
-                    onDrawingClick={handleDrawingClick}
-                />
+                <SocketProvider>
+                    <AppContent 
+                        isDrawingModalOpen={isDrawingModalOpen}
+                        onDrawingModalClose={() => setIsDrawingModalOpen(false)}
+                        onDrawingClick={handleDrawingClick}
+                    />
+                </SocketProvider>
             </AuthProvider>
         </ThemeProvider>
     );

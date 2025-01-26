@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useSocket } from '../context/SocketContext';
 import AuthModal from './AuthModal';
 import EmojiPicker from 'emoji-picker-react';
 
@@ -10,11 +11,10 @@ const Chat = ({ room }) => {
     const [error, setError] = useState(null);
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
-    const wsRef = useRef(null);
-    const reconnectTimeoutRef = useRef(null);
     const messagesEndRef = useRef(null);
     const emojiPickerRef = useRef(null);
-    const { token, isAuthenticated, user } = useAuth();
+    const { isAuthenticated, user } = useAuth();
+    const { socket, emit } = useSocket();
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -36,187 +36,44 @@ const Chat = ({ room }) => {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    useEffect(() => {
+        if (!socket) return;
+
+        // Join room when component mounts or room changes
+        emit('room_change', room);
+
+        // Socket event listeners
+        socket.on('chat_message', (message) => {
+            setMessages(prev => [...prev, message]);
+        });
+
+        socket.on('chat_history', (data) => {
+            setMessages(data.messages || []);
+            setIsLoading(false);
+        });
+
+        // Cleanup listeners when component unmounts
+        return () => {
+            socket.off('chat_message');
+            socket.off('chat_history');
+        };
+    }, [socket, room, emit]);
+
     const onEmojiClick = (emojiObject) => {
         setNewMessage(prev => prev + emojiObject.emoji);
         setShowEmojiPicker(false);
     };
 
-    const connectWebSocket = () => {
-        if (wsRef.current) {
-            wsRef.current.close();
-        }
-
-        setIsLoading(true);
-        wsRef.current = new WebSocket('ws://localhost:3001');
-
-        // Set up ping timeout
-        const pingTimeout = 35000; // slightly longer than server's ping interval
-        let pingTimeoutId = null;
-
-        const heartbeat = () => {
-            if (pingTimeoutId) clearTimeout(pingTimeoutId);
-            pingTimeoutId = setTimeout(() => {
-                console.log('Connection lost - no ping received');
-                wsRef.current.close();
-            }, pingTimeout);
-        };
-
-        wsRef.current.onopen = () => {
-            console.log('Chat WebSocket connected');
-            setError(null);
-            heartbeat();
-
-            // Send auth token
-            if (token) {
-                wsRef.current.send(JSON.stringify({
-                    type: 'auth',
-                    token: token
-                }));
-            }
-
-            // Send initial room after authentication
-            if (room) {
-                console.log('Sending initial room:', room);
-                wsRef.current.send(JSON.stringify({
-                    type: 'room_change',
-                    room: room
-                }));
-            }
-        };
-
-        wsRef.current.onmessage = (event) => {
-            heartbeat();
-            
-            try {
-                const data = JSON.parse(event.data);
-                console.log('Received message:', data);
-                
-                if (data.type === 'auth_success') {
-                    console.log('Authentication successful');
-                    // Send room change after successful auth
-                    if (room) {
-                        console.log('Sending room after auth:', room);
-                        wsRef.current.send(JSON.stringify({
-                            type: 'room_change',
-                            room: room
-                        }));
-                    }
-                }
-                else if (data.type === 'chat_message') {
-                    if (!data.id || !data.username || !data.text) {
-                        console.error('Invalid chat message format:', data);
-                        setError('Received invalid message format from server');
-                        return;
-                    }
-                    setMessages(prev => {
-                        if (prev.some(msg => msg.id === data.id)) {
-                            return prev;
-                        }
-                        return [...prev, data];
-                    });
-                    setIsLoading(false);
-                } else if (data.type === 'chat_history') {
-                    console.log('Received chat history:', data.messages);
-                    if (!Array.isArray(data.messages)) {
-                        console.error('Invalid chat history format:', data);
-                        setError('Received invalid chat history format from server');
-                        return;
-                    }
-                    
-                    // Map messages to ensure they have all required fields
-                    const validMessages = data.messages.map(msg => ({
-                        id: msg.id || msg._id,
-                        type: 'chat_message',
-                        username: msg.username,
-                        text: msg.text,
-                        timestamp: msg.timestamp || msg.createdAt
-                    }));
-                    
-                    console.log('Processed chat history:', validMessages);
-                    setMessages(validMessages);
-                    setIsLoading(false);
-                } else if (data.type === 'error') {
-                    console.error('Server error:', data.error);
-                    setError(data.error);
-                    setIsLoading(false);
-                    setTimeout(() => setError(null), 3000);
-                }
-            } catch (err) {
-                console.error('Failed to parse WebSocket message:', err, event.data);
-                setError('Failed to parse message from server');
-                setIsLoading(false);
-                setTimeout(() => setError(null), 3000);
-            }
-        };
-
-        wsRef.current.onerror = (error) => {
-            console.error('Chat WebSocket error:', error);
-            setError('Failed to connect to chat server');
-            setIsLoading(false);
-            if (pingTimeoutId) clearTimeout(pingTimeoutId);
-        };
-
-        wsRef.current.onclose = (event) => {
-            console.log('Chat WebSocket disconnected:', {
-                code: event.code,
-                reason: event.reason,
-                wasClean: event.wasClean
-            });
-            
-            setIsLoading(false);
-            if (pingTimeoutId) clearTimeout(pingTimeoutId);
-            
-            // Only attempt to reconnect if we're still authenticated and it wasn't a clean close
-            if (isAuthenticated && (!event.wasClean || event.code === 1006)) {
-                console.log('Attempting to reconnect...');
-                reconnectTimeoutRef.current = setTimeout(connectWebSocket, 2000);
-            }
-        };
-    };
-
-    useEffect(() => {
-        if (isAuthenticated) {
-            connectWebSocket();
-        }
-
-        return () => {
-            if (wsRef.current) {
-                wsRef.current.close(1000, 'Component unmounting');
-            }
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-            }
-        };
-    }, [isAuthenticated]);
-
-    useEffect(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN && room) {
-            console.log('Sending room change:', room);
-            wsRef.current.send(JSON.stringify({
-                type: 'room_change',
-                room: room
-            }));
-            setMessages([]);
-            setIsLoading(true);
-        }
-    }, [room]);
-
     const handleSubmit = (e) => {
         e.preventDefault();
-
         if (!newMessage.trim()) return;
 
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                type: 'chat_message',
-                text: newMessage.trim()
-            }));
-            setNewMessage('');
-            setShowEmojiPicker(false);
-        } else {
-            setError('Not connected to chat server');
-            setTimeout(() => setError(null), 3000);
-        }
+        emit('chat_message', {
+            content: newMessage.trim()
+        });
+        
+        setNewMessage('');
+        setShowEmojiPicker(false);
     };
 
     return (

@@ -2,11 +2,13 @@ import React, { useRef, useState } from 'react';
 import DrawingModal from './DrawingModal';
 import UploadButton from './UploadButton';
 import Toast from './Toast';
+import { useAuth } from '../context/AuthContext';
 
 const VideoDescription = ({ room, isDrawingModalOpen, onDrawingModalClose: onDrawClick }) => {
     const [uploading, setUploading] = useState(false);
     const [toast, setToast] = useState(null);
     const fileInputRef = useRef(null);
+    const { token } = useAuth();
 
     const showToast = (message, type = 'success') => {
         setToast({ message, type });
@@ -19,6 +21,11 @@ const VideoDescription = ({ room, isDrawingModalOpen, onDrawingModalClose: onDra
     const handleFileChange = async (e) => {
         const selectedFile = e.target.files[0];
         if (!selectedFile) return;
+
+        if (!token) {
+            showToast('Please log in to upload files', 'error');
+            return;
+        }
 
         if (selectedFile.type.startsWith('video/') || selectedFile.type.startsWith('image/')) {
             setUploading(true);
@@ -42,23 +49,20 @@ const VideoDescription = ({ room, isDrawingModalOpen, onDrawingModalClose: onDra
                     URL.revokeObjectURL(video.src);
                 }
 
-                const response = await fetch(`http://localhost:3001/upload/${room}`, {
+                const response = await fetch(`http://localhost:3001/api/upload/${room || 'home'}`, {
                     method: 'POST',
                     body: formData,
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
                 });
 
-                const text = await response.text();
-                let data;
-                try {
-                    data = JSON.parse(text);
-                } catch (e) {
-                    throw new Error('Upload failed: ' + text);
-                }
-
                 if (!response.ok) {
-                    throw new Error(data.error || 'Upload failed');
+                    const errorText = await response.text();
+                    throw new Error(errorText);
                 }
 
+                const data = await response.json();
                 console.log('Upload successful!', data);
                 showToast('File uploaded successfully! 🎉');
             } catch (error) {
@@ -87,13 +91,13 @@ const VideoDescription = ({ room, isDrawingModalOpen, onDrawingModalClose: onDra
                 <div className="flex space-x-2">
                     <UploadButton
                         onClick={() => fileInputRef.current.click()}
-                        disabled={uploading}
+                        disabled={uploading || !token}
                         uploading={uploading}
                     />
                     <button
                         id="video-description-draw-button"
                         onClick={onDrawClick}
-                        disabled={uploading}
+                        disabled={uploading || !token}
                         className="px-4 py-2 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-lg hover:opacity-90 flex items-center space-x-2 transition-all border border-purple-500/20 hover:border-purple-500/50 hover:shadow-lg hover:shadow-purple-500/20"
                     >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -116,14 +120,14 @@ const VideoDescription = ({ room, isDrawingModalOpen, onDrawingModalClose: onDra
                 <div className="flex justify-center space-x-4 py-4 border-t dark:border-gray-700">
                     <UploadButton
                         onClick={() => document.querySelector('#mobile-file-input').click()}
-                        disabled={uploading}
+                        disabled={uploading || !token}
                         uploading={uploading}
                         className="text-sm"
                     />
                     <button
                         onClick={onDrawClick}
                         className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center space-x-2 transition-colors text-sm"
-                        disabled={uploading}
+                        disabled={uploading || !token}
                     >
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />

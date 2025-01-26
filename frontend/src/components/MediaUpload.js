@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
 import DrawingModal from './DrawingModal';
+import { useAuth } from '../context/AuthContext';
 
-const MediaUpload = () => {
+const MediaUpload = ({ room }) => {
     const [file, setFile] = useState(null);
     const [uploading, setUploading] = useState(false);
     const [uploadStatus, setUploadStatus] = useState('');
     const [isDrawingModalOpen, setIsDrawingModalOpen] = useState(false);
+    const { token } = useAuth();
 
     const handleFileChange = (e) => {
         const selectedFile = e.target.files[0];
@@ -23,16 +25,28 @@ const MediaUpload = () => {
             return;
         }
 
+        if (!token) {
+            setUploadStatus('Please log in to upload files');
+            return;
+        }
+
         setUploading(true);
         const formData = new FormData();
         formData.append('file', file);
 
         try {
-            const response = await fetch('http://localhost:3001/upload', {
+            const response = await fetch(`http://localhost:3001/api/upload/${room || 'home'}`, {
                 method: 'POST',
                 body: formData,
-                credentials: 'include',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
             });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(errorText);
+            }
 
             const data = await response.json();
             
@@ -46,6 +60,7 @@ const MediaUpload = () => {
                 setUploadStatus(`Upload failed: ${data.error}`);
             }
         } catch (error) {
+            console.error('Upload error:', error);
             setUploadStatus(`Error: ${error.message}`);
         } finally {
             setUploading(false);

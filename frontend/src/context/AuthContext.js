@@ -2,6 +2,8 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 
 const AuthContext = createContext(null);
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:3001';
+
 export const AuthProvider = ({ children }) => {
     const [user, setUser] = useState(null);
     const [loading, setLoading] = useState(true);
@@ -18,7 +20,7 @@ export const AuthProvider = ({ children }) => {
 
     const fetchUser = async () => {
         try {
-            const response = await fetch('http://localhost:3001/auth/user', {
+            const response = await fetch(`${API_URL}/api/auth/user`, {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
@@ -41,7 +43,7 @@ export const AuthProvider = ({ children }) => {
 
     const login = async (username, password) => {
         try {
-            const response = await fetch('http://localhost:3001/auth/login', {
+            const response = await fetch(`${API_URL}/api/auth/login`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -50,21 +52,23 @@ export const AuthProvider = ({ children }) => {
             });
 
             const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Login failed');
-            }
 
-            setToken(data.token);
-            setUser(data.user);
-            return { success: true };
+            if (response.ok) {
+                setToken(data.token);
+                setUser(data.user);
+                return { success: true };
+            } else {
+                return { success: false, error: data.error || 'Login failed' };
+            }
         } catch (error) {
-            return { success: false, error: error.message };
+            console.error('Login error:', error);
+            return { success: false, error: 'Network error' };
         }
     };
 
     const signup = async (username, password) => {
         try {
-            const response = await fetch('http://localhost:3001/auth/signup', {
+            const response = await fetch(`${API_URL}/api/auth/signup`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -73,32 +77,41 @@ export const AuthProvider = ({ children }) => {
             });
 
             const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Signup failed');
-            }
 
-            setToken(data.token);
-            setUser(data.user);
-            return { success: true };
+            if (response.ok) {
+                setToken(data.token);
+                setUser(data.user);
+                return { success: true };
+            } else {
+                return { success: false, error: data.error || 'Signup failed' };
+            }
         } catch (error) {
-            return { success: false, error: error.message };
+            console.error('Signup error:', error);
+            return { success: false, error: 'Network error' };
         }
     };
 
     const loginAsGuest = async () => {
         try {
-            const response = await fetch('http://localhost:3001/auth/guest', {
-                method: 'POST'
+            const response = await fetch(`${API_URL}/api/auth/guest`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
             });
+
             const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Guest login failed');
+
+            if (response.ok) {
+                setToken(data.token);
+                setUser(data.user);
+                return { success: true };
+            } else {
+                return { success: false, error: data.error || 'Guest login failed' };
             }
-            setToken(data.token);
-            setUser(data.user);
-            return { success: true };
         } catch (error) {
-            return { success: false, error: error.message };
+            console.error('Guest login error:', error);
+            return { success: false, error: 'Network error' };
         }
     };
 

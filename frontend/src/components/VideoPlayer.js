@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactPlayer from 'react-player';
-import { useAuth } from '../context/AuthContext';
+import { useSocket } from '../context/SocketContext';
 
 const roomConfigs = {
     '10-second-room': {
@@ -18,7 +18,7 @@ const roomConfigs = {
 };
 
 const VideoPlayer = ({ room }) => {
-    const { token } = useAuth();
+    const { socket, emit } = useSocket();
     const [currentMedia, setCurrentMedia] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -26,106 +26,45 @@ const VideoPlayer = ({ room }) => {
     const [volume, setVolume] = useState(0.8);
     const [progress, setProgress] = useState(0);
     const [timeUntilNext, setTimeUntilNext] = useState(roomConfigs[room].countdown);
-    const [reconnectTrigger, setReconnectTrigger] = useState(0);
     const mediaRef = useRef(null);
-    const wsRef = useRef(null);
-    const reconnectTimeoutRef = useRef(null);
     const timerRef = useRef(null);
 
     useEffect(() => {
-        const ws = new WebSocket(`ws://localhost:3001`);
-        wsRef.current = ws;
+        if (!socket) return;
 
-        ws.onopen = () => {
-            console.log('VideoPlayer WebSocket connected');
-            setError(null);
-            
-            // Stop any current playback before changing rooms
+        // Join room when component mounts or room changes
+        emit('room_change', room);
+
+        const handleRoomChanged = (data) => {
+            console.log('Room changed to:', data.room);
             setCurrentMedia(null);
             setPlaying(false);
-            
-            ws.send(JSON.stringify({
-                type: 'room_change',
-                room: room
-            }));
-        };
-
-        ws.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                console.log('VideoPlayer received message:', message);
-
-                switch (message.type) {
-                    case 'connected':
-                        console.log('Connection confirmed, client ID:', message.clientId);
-                        break;
-
-                    case 'room_changed':
-                        console.log('Room changed to:', message.room);
-                        // Clear current media when changing rooms
-                        setCurrentMedia(null);
-                        setPlaying(false);
-                        setLoading(false);
-                        break;
-
-                    case 'media_state':
-                        console.log('Received media state:', message);
-                        if (message.media) {
-                            setCurrentMedia(message.media);
-                            setPlaying(true);
-                            setLoading(false);
-                        } else {
-                            setCurrentMedia(null);
-                            setPlaying(false);
-                            setLoading(false);
-                        }
-                        break;
-
-                    case 'media_queued':
-                        console.log('New media queued:', message);
-                        break;
-
-                    case 'error':
-                        console.error('WebSocket error:', message.message);
-                        setError(message.message);
-                        break;
-
-                    default:
-                        console.log('Unknown message type:', message.type);
-                }
-            } catch (err) {
-                console.error('Error parsing WebSocket message:', err);
-            }
-        };
-
-        ws.onerror = (error) => {
-            console.error('VideoPlayer WebSocket error:', error);
-            setError('Connection error');
-        };
-
-        ws.onclose = () => {
-            console.log('VideoPlayer WebSocket closed');
-            setPlaying(false);
             setLoading(false);
-            if (!reconnectTimeoutRef.current) {
-                reconnectTimeoutRef.current = setTimeout(() => {
-                    console.log('Attempting to reconnect VideoPlayer...');
-                    reconnectTimeoutRef.current = null;
-                    setReconnectTrigger(prev => prev + 1);
-                }, 5000);
+        };
+
+        const handleMediaState = (data) => {
+            console.log('Received media state:', data);
+            if (data.media) {
+                setCurrentMedia(data.media);
+                setPlaying(true);
+                setLoading(false);
+            } else {
+                setCurrentMedia(null);
+                setPlaying(false);
+                setLoading(false);
             }
         };
 
+        // Set up event listeners
+        socket.on('room_changed', handleRoomChanged);
+        socket.on('media_state', handleMediaState);
+
+        // Cleanup listeners when component unmounts or room changes
         return () => {
-            console.log('Cleaning up VideoPlayer WebSocket');
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.close();
-            }
-            if (reconnectTimeoutRef.current) {
-                clearTimeout(reconnectTimeoutRef.current);
-            }
+            socket.off('room_changed', handleRoomChanged);
+            socket.off('media_state', handleMediaState);
         };
-    }, [room, reconnectTrigger]);
+    }, [socket, room, emit]);
 
     useEffect(() => {
         if (currentMedia) {
@@ -153,16 +92,8 @@ const VideoPlayer = ({ room }) => {
         }
     }, [currentMedia, room]);
 
-    const handleEnded = () => {
-        console.log('Media ended');
-        setPlaying(false);
-        setCurrentMedia(null);
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({
-                type: 'request_next_media',
-                room: room
-            }));
-        }
+    const handleMediaEnd = () => {
+        emit('request_next_media');
     };
 
     if (error) {
@@ -191,7 +122,7 @@ const VideoPlayer = ({ room }) => {
                         playing={true}
                         volume={volume}
                         onProgress={({ played }) => setProgress(played)}
-                        onEnded={handleEnded}
+                        onEnded={handleMediaEnd}
                         onError={(error) => {
                             console.error('Player error:', error);
                             setError('Failed to load video');
@@ -211,7 +142,7 @@ const VideoPlayer = ({ room }) => {
                         className="w-full h-full object-contain"
                         onError={() => setError('Failed to load image')}
                         onLoad={() => {
-                            setTimeout(handleEnded, roomConfigs[room].interval || 30000);
+                            setTimeout(handleMediaEnd, roomConfigs[room].interval || 30000);
                         }}
                     />
                 )}

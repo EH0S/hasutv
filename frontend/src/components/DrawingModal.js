@@ -37,6 +37,11 @@ const DrawingModal = ({ isOpen, onClose, onSave, uploading }) => {
     const [currentColor, setCurrentColor] = useState('#000000');
     const [brushSize, setBrushSize] = useState(5);
     const [currentTool, setCurrentTool] = useState(TOOLS.BRUSH);
+    const drawingStateRef = useRef({
+        isDrawing: false,
+        lastX: 0,
+        lastY: 0
+    });
 
     useEffect(() => {
         if (!canvasRef.current) return;
@@ -64,26 +69,60 @@ const DrawingModal = ({ isOpen, onClose, onSave, uploading }) => {
         contextRef.current.lineWidth = brushSize;
     }, [currentColor, brushSize, currentTool]);
 
-    const getCoordinates = (event) => {
-        if (!canvasRef.current) return { x: 0, y: 0 };
-        
-        const canvas = canvasRef.current;
-        const rect = canvas.getBoundingClientRect();
-        
-        let clientX, clientY;
+    const getEventCoordinates = (event) => {
+        if (!canvasRef.current) return null;
+        const rect = canvasRef.current.getBoundingClientRect();
         
         if (event.touches) {
-            clientX = event.touches[0].clientX;
-            clientY = event.touches[0].clientY;
-        } else {
-            clientX = event.clientX;
-            clientY = event.clientY;
+            const touch = event.touches[0];
+            return {
+                x: touch.clientX - rect.left,
+                y: touch.clientY - rect.top
+            };
         }
-
+        
         return {
-            x: Math.floor(clientX - rect.left),
-            y: Math.floor(clientY - rect.top)
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top
         };
+    };
+
+    const startDrawing = (event) => {
+        if (currentTool === TOOLS.BUCKET) return;
+        
+        const coords = getEventCoordinates(event);
+        if (!coords || !contextRef.current) return;
+
+        drawingStateRef.current = {
+            isDrawing: true,
+            lastX: coords.x,
+            lastY: coords.y
+        };
+        setIsDrawing(true);
+
+        contextRef.current.beginPath();
+        contextRef.current.moveTo(coords.x, coords.y);
+    };
+
+    const draw = (event) => {
+        if (currentTool === TOOLS.BUCKET || !drawingStateRef.current.isDrawing || !contextRef.current) return;
+        
+        const coords = getEventCoordinates(event);
+        if (!coords) return;
+
+        contextRef.current.lineTo(coords.x, coords.y);
+        contextRef.current.stroke();
+        
+        drawingStateRef.current.lastX = coords.x;
+        drawingStateRef.current.lastY = coords.y;
+    };
+
+    const stopDrawing = () => {
+        if (contextRef.current) {
+            contextRef.current.closePath();
+        }
+        drawingStateRef.current.isDrawing = false;
+        setIsDrawing(false);
     };
 
     const hexToRgb = (hex) => {
@@ -158,39 +197,10 @@ const DrawingModal = ({ isOpen, onClose, onSave, uploading }) => {
 
     const handleCanvasClick = (event) => {
         if (currentTool === TOOLS.BUCKET) {
-            const { x, y } = getCoordinates(event);
-            floodFill(x, y, currentColor);
+            const coords = getEventCoordinates(event);
+            if (!coords) return;
+            floodFill(coords.x, coords.y, currentColor);
         }
-    };
-
-    const startDrawing = (event) => {
-        if (currentTool === TOOLS.BUCKET) return;
-        
-        event.preventDefault();
-        const { x, y } = getCoordinates(event);
-        if (contextRef.current) {
-            contextRef.current.beginPath();
-            contextRef.current.moveTo(x, y);
-            setIsDrawing(true);
-        }
-    };
-
-    const draw = (event) => {
-        if (currentTool === TOOLS.BUCKET) return;
-        
-        event.preventDefault();
-        if (!isDrawing || !contextRef.current) return;
-        
-        const { x, y } = getCoordinates(event);
-        contextRef.current.lineTo(x, y);
-        contextRef.current.stroke();
-    };
-
-    const stopDrawing = () => {
-        if (contextRef.current) {
-            contextRef.current.closePath();
-        }
-        setIsDrawing(false);
     };
 
     const clearCanvas = () => {
@@ -324,7 +334,8 @@ const DrawingModal = ({ isOpen, onClose, onSave, uploading }) => {
                 <div className="border rounded dark:border-gray-600 overflow-hidden mb-4" style={{ height: '400px' }}>
                     <canvas
                         ref={canvasRef}
-                        className="bg-white cursor-crosshair touch-none w-full h-full"
+                        style={{ touchAction: 'none' }}
+                        className="bg-white cursor-crosshair w-full h-full"
                         onMouseDown={startDrawing}
                         onMouseMove={draw}
                         onMouseUp={stopDrawing}

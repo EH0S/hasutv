@@ -1,12 +1,12 @@
 import express from 'express';
-import cors from 'cors';
-import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import jwt from 'jsonwebtoken';
 import fs from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import { check, validationResult } from 'express-validator';
 import User from './models/User.js';
 import multer from "multer";
@@ -26,6 +26,17 @@ const __dirname = dirname(__filename);
 
 dotenv.config();
 
+// JWT Configuration
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h';
+const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+const JWT_REFRESH_EXPIRES_IN = process.env.JWT_REFRESH_EXPIRES_IN || '7d';
+
+if (!JWT_SECRET || !JWT_REFRESH_SECRET) {
+    console.error('JWT_SECRET and JWT_REFRESH_SECRET must be set in environment variables');
+    process.exit(1);
+}
+
 // Configure ffmpeg paths
 ffmpeg.setFfmpegPath(ffmpegPath.path);
 ffmpeg.setFfprobePath(ffprobePath.path);
@@ -33,11 +44,32 @@ ffmpeg.setFfprobePath(ffprobePath.path);
 // Initialize global variables
 const app = express();
 const port = 3001;
-const server = createServer(app);
-const wss = new WebSocketServer({ server });
 const clients = new Map();
 const mediaQueues = {};
 const uploadsDir = path.join(__dirname, 'uploads');
+
+// Configure CORS
+app.use(cors({
+    origin: 'http://localhost:3000',
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
+}));
+
+// Create HTTP server and Socket.IO instance
+const server = createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: "http://localhost:3000",
+        methods: ["GET", "POST"],
+        credentials: true
+    },
+    transports: ['websocket', 'polling']
+});
+
+// Middleware
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Room configurations
 const roomConfigs = {
@@ -45,6 +77,7 @@ const roomConfigs = {
         interval: 30000,  // 30 seconds
         maxDuration: 30,  // 30 seconds
         mediaQueue: [],
+        currentMedia: null,
         processingQueue: false,
         timer: null
     },
@@ -52,6 +85,7 @@ const roomConfigs = {
         interval: 10000,  // 10 seconds
         maxDuration: 10,  // 10 seconds
         mediaQueue: [],
+        currentMedia: null,
         processingQueue: false,
         timer: null
     },
@@ -59,6 +93,7 @@ const roomConfigs = {
         interval: 30000,  // 30 seconds
         maxDuration: 30,  // 30 seconds
         mediaQueue: [],
+        currentMedia: null,
         processingQueue: false,
         timer: null
     },
@@ -66,6 +101,7 @@ const roomConfigs = {
         interval: 60000,  // 60 seconds
         maxDuration: 60,  // 60 seconds
         mediaQueue: [],
+        currentMedia: null,
         processingQueue: false,
         timer: null
     }
@@ -140,16 +176,7 @@ const trimVideo = (inputPath, outputPath, duration) => {
 // Broadcast to room
 const broadcastToRoom = (room, message) => {
     let count = 0;
-    clients.forEach((client, id) => {
-        if (client.room === room && client.ws.readyState === WebSocket.OPEN) {
-            try {
-                client.ws.send(JSON.stringify(message));
-                count++;
-            } catch (error) {
-                console.error(`Error broadcasting to client ${id}:`, error);
-            }
-        }
-    });
+    io.to(room).emit('message', message);
     console.log(`Broadcasted message to ${count} clients in room ${room}`);
 };
 
@@ -161,8 +188,7 @@ const getNextMedia = async (room) => {
 
     if (!roomConfigs[room] || !roomConfigs[room].mediaQueue) {
         console.log('No room config or queue');
-        broadcastToRoom(room, {
-            type: 'media_state',
+        io.to(room).emit('media_state', {
             media: null,
             queue: []
         });
@@ -175,8 +201,8 @@ const getNextMedia = async (room) => {
 
     if (queue.length === 0) {
         console.log('Queue is empty');
-        broadcastToRoom(room, {
-            type: 'media_state',
+        roomConfigs[room].currentMedia = null;
+        io.to(room).emit('media_state', {
             media: null,
             queue: []
         });
@@ -194,6 +220,9 @@ const getNextMedia = async (room) => {
     const currentMedia = queue[0];
     console.log('Current media:', currentMedia);
 
+    // Update room's current media
+    roomConfigs[room].currentMedia = currentMedia;
+
     // Verify the media file exists before proceeding
     const mediaPath = path.join(uploadsDir, room, currentMedia.id);
     console.log(`Checking media file: ${mediaPath}`);
@@ -207,8 +236,7 @@ const getNextMedia = async (room) => {
         console.log('Remaining queue:', remainingQueue);
 
         // Broadcast current media state
-        broadcastToRoom(room, {
-            type: 'media_state',
+        io.to(room).emit('media_state', {
             media: currentMedia,
             queue: remainingQueue
         });
@@ -287,43 +315,35 @@ const cleanupMediaFiles = async (room, mediaItem) => {
 };
 
 // Start media playback for a room
-const startMediaPlayback = (room) => {
+const startMediaPlayback = async (room) => {
     console.log('\n=== Starting media playback ===');
     console.log(`Room: ${room}`);
 
     if (!roomConfigs[room]) {
-        console.error('Invalid room');
+        console.log('Invalid room');
         return;
     }
 
+    if (roomConfigs[room].processingQueue) {
+        console.log('Already processing queue');
+        return;
+    }
+
+    roomConfigs[room].processingQueue = true;
     const queue = roomConfigs[room].mediaQueue;
-    console.log(`Queue length: ${queue?.length}`);
     
     if (!queue || queue.length === 0) {
         console.log('No media in queue');
-        broadcastToRoom(room, {
-            type: 'media_state',
-            media: null,
-            queue: []
-        });
+        roomConfigs[room].processingQueue = false;
         return;
     }
 
-    // Don't start new playback if already playing
     if (roomConfigs[room].timer) {
         console.log('Playback already in progress');
-        // Send current state to the client without restarting playback
-        broadcastToRoom(room, {
-            type: 'media_state',
-            media: queue[0],
-            queue: queue.slice(1)
-        });
         return;
     }
 
-    console.log('Starting playback with first item');
-    getNextMedia(room);
-    console.log('=== Finished starting playback ===\n');
+    await getNextMedia(room);
 };
 
 // Add media to queue
@@ -344,8 +364,7 @@ const addToMediaQueue = (room, mediaItem) => {
     console.log('Current queue:', roomConfigs[room].mediaQueue);
 
     // Broadcast updated queue to all clients in the room
-    broadcastToRoom(room, {
-        type: 'queue_update',
+    io.to(room).emit('queue_update', {
         queue: roomConfigs[room].mediaQueue
     });
 
@@ -364,16 +383,22 @@ const getRoomMediaQueue = (room) => {
 };
 
 // Clean up file safely
-const safeDeleteFile = (filePath) => {
+const safeDeleteFile = async (filePath) => {
     try {
-        if (fs.existsSync(filePath)) {
-            fs.unlinkSync(filePath);
-            console.log(`Successfully deleted file: ${filePath}`);
-        } else {
-            console.log(`File not found for deletion: ${filePath}`);
-        }
+        await fs.promises.unlink(filePath);
+        console.log(`Successfully deleted file: ${filePath}`);
+        return true;
     } catch (error) {
-        console.error(`Error deleting file ${filePath}:`, error);
+        if (error.code === 'ENOENT') {
+            console.log(`File not found for deletion: ${filePath}`);
+            return true;
+        } else if (error.code === 'EACCES') {
+            console.error(`Permission denied when deleting file ${filePath}`);
+            throw new Error(`Permission denied: ${error.message}`);
+        } else {
+            console.error(`Error deleting file ${filePath}:`, error);
+            throw new Error(`Failed to delete file: ${error.message}`);
+        }
     }
 };
 
@@ -463,26 +488,602 @@ const initializeServer = async () => {
         // Initialize rooms in database
         await initializeRooms();
         
-        // Start server
-        server.listen(port, () => {
-            console.log(`Server running on port ${port}`);
-            console.log('Room configurations:', Object.keys(roomConfigs));
-        });
-
     } catch (error) {
         console.error('Failed to initialize server:', error);
         process.exit(1);
     }
 };
 
-// Initialize media queues and start server
-initializeServer().catch(error => {
-    console.error('Server initialization failed:', error);
-    process.exit(1);
+// Authentication middleware
+const auth = async (req, res, next) => {
+    try {
+        const token = req.header('Authorization')?.replace('Bearer ', '');
+        if (!token) {
+            throw new Error('No token provided');
+        }
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = await User.findById(decoded.userId);
+        
+        if (!user) {
+            throw new Error('User not found');
+        }
+
+        req.user = user;
+        req.token = token;
+        next();
+    } catch (error) {
+        console.error('Authentication error:', error.message);
+        res.status(401).json({ error: 'Please authenticate', details: error.message });
+    }
+};
+
+// Sign up route
+app.post('/api/auth/signup', [
+    check('username').isLength({ min: 3 }).trim().escape(),
+    check('password').isLength({ min: 6 })
+], async (req, res) => {
+    try {
+        console.log('Signup attempt:', { username: req.body.username });
+        
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            console.log('Validation errors:', errors.array());
+            return res.status(400).json({ errors: errors.array() });
+        }
+
+        const { username, password } = req.body;
+        const ip = getClientIp(req);
+
+        // Check if username exists
+        const existingUser = await User.findOne({ username });
+        if (existingUser) {
+            console.log('Username already exists:', username);
+            return res.status(400).json({ error: 'Username already exists' });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        // Create user
+        const user = new User({
+            username,
+            password: hashedPassword,
+            ipAddresses: [{ ip, lastUsed: new Date() }]
+        });
+
+        console.log('Attempting to save user:', username);
+        const savedUser = await user.save();
+        console.log('User saved successfully:', savedUser._id);
+
+        // Generate tokens
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+        const refreshToken = jwt.sign({ userId: user._id }, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
+
+        res.status(201).json({
+            token,
+            refreshToken,
+            user: { id: user._id, username: user.username }
+        });
+    } catch (error) {
+        console.error('Signup error:', error);
+        res.status(500).json({ error: 'Error creating user', details: error.message });
+    }
 });
 
-// JWT secret key - in production, use an environment variable
-const JWT_SECRET = process.env.JWT_SECRET || 'your-jwt-secret-key';
+// Login route
+app.post('/api/auth/login', async (req, res) => {
+    try {
+        const { username, password } = req.body;
+
+        // Find user
+        const user = await User.findOne({ username });
+        if (!user || user.isGuest) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Check password
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
+
+        // Generate tokens
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+        const refreshToken = jwt.sign({ userId: user._id }, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
+
+        res.json({
+            token,
+            refreshToken,
+            user: { id: user._id, username: user.username }
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Error logging in', details: error.message });
+    }
+});
+
+// Guest login route
+app.post('/api/auth/guest', async (req, res) => {
+    try {
+        const username = await generateGuestUsername();
+        const ip = getClientIp(req);
+        
+        // Create guest user
+        const user = new User({
+            username,
+            isGuest: true,
+            ipAddresses: [{ ip, lastUsed: new Date() }]
+        });
+
+        await user.save();
+
+        // Generate tokens
+        const token = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+        const refreshToken = jwt.sign({ userId: user._id }, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
+
+        res.json({
+            token,
+            refreshToken,
+            user: { id: user._id, username: user.username }
+        });
+    } catch (error) {
+        console.error('Guest login error:', error);
+        res.status(500).json({ error: 'Error creating guest user', details: error.message });
+    }
+});
+
+// Refresh token route
+app.post('/api/auth/refresh', async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+        if (!refreshToken) {
+            return res.status(400).json({ error: 'Refresh token is required' });
+        }
+
+        const decoded = jwt.verify(refreshToken, JWT_REFRESH_SECRET);
+        const user = await User.findById(decoded.userId);
+        
+        if (!user) {
+            return res.status(401).json({ error: 'User not found' });
+        }
+
+        // Generate new tokens
+        const newToken = jwt.sign({ userId: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+        const newRefreshToken = jwt.sign({ userId: user._id }, JWT_REFRESH_SECRET, { expiresIn: JWT_REFRESH_EXPIRES_IN });
+
+        res.json({
+            token: newToken,
+            refreshToken: newRefreshToken,
+            user: { id: user._id, username: user.username }
+        });
+    } catch (error) {
+        console.error('Token refresh error:', error);
+        res.status(401).json({ error: 'Invalid refresh token' });
+    }
+});
+
+// Get current user
+app.get('/api/auth/user', auth, async (req, res) => {
+    res.json({ user: { id: req.user._id, username: req.user.username } });
+});
+
+// Get chat history
+app.get('/api/chat/history', auth, async (req, res) => {
+    try {
+        const messages = await ChatMessage.find({})
+            .sort({ createdAt: -1 })
+            .limit(50);
+        res.json(messages.reverse());
+    } catch (error) {
+        res.status(500).json({ error: 'Error fetching chat history' });
+    }
+});
+
+// Get user stats
+app.get('/api/user/stats', auth, async (req, res) => {
+    try {
+        const user = await User.findById(req.user._id);
+        const messageCount = await ChatMessage.countDocuments({ userId: req.user._id });
+        
+        res.json({
+            username: user.username,
+            messageCount,
+            ipAddresses: user.ipAddresses,
+            lastActive: user.lastActive,
+            createdAt: user.createdAt
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Error fetching user stats' });
+    }
+});
+
+// Handle file uploads
+app.post('/api/upload/:room', auth, upload.single('file'), async (req, res) => {
+    let originalFile = null;
+    let trimmedFile = null;
+
+    try {
+        const room = req.params.room;
+        const file = req.file;
+
+        if (!file) {
+            return res.status(400).json({ error: 'No file uploaded' });
+        }
+
+        originalFile = file.path;
+
+        // Check if it's a valid room
+        if (!isValidRoom(room)) {
+            await safeDeleteFile(originalFile);
+            return res.status(400).json({ error: 'Invalid room' });
+        }
+
+        // Check if user is authenticated
+        if (!req.user) {
+            await safeDeleteFile(originalFile);
+            return res.status(401).json({ error: 'Authentication required' });
+        }
+
+        // Get file duration if it's a video
+        let duration = 0;
+        let finalPath = file.path;
+
+        if (file.mimetype.startsWith('video/')) {
+            try {
+                const metadata = await getVideoMetadata(file.path);
+                duration = metadata.format.duration;
+                console.log(`Original video duration: ${duration}s`);
+
+                // Always trim videos in duration-limited rooms
+                if (room !== 'home' && duration > roomConfigs[room].maxDuration) {
+                    console.log(`Trimming video from ${duration}s to ${roomConfigs[room].maxDuration}s`);
+                    const trimmedPath = path.join(
+                        path.dirname(file.path),
+                        'trimmed-' + path.basename(file.path)
+                    );
+                    
+                    await trimVideo(file.path, trimmedPath, roomConfigs[room].maxDuration);
+                    trimmedFile = trimmedPath;
+                    finalPath = trimmedPath;
+                    duration = roomConfigs[room].maxDuration;
+                    console.log(`Video trimmed successfully. New duration: ${duration}s`);
+
+                    // Delete original file after successful trim
+                    console.log('Deleting original file after trim:', originalFile);
+                    await safeDeleteFile(originalFile);
+                    originalFile = null;
+                } else {
+                    console.log(`Video duration (${duration}s) within limits for room ${room}`);
+                }
+            } catch (error) {
+                console.error('Error processing video:', error);
+                await safeDeleteFile(originalFile);
+                if (trimmedFile) await safeDeleteFile(trimmedFile);
+                return res.status(400).json({ error: 'Failed to process video' });
+            }
+        }
+
+        // Create media item
+        const mediaItem = {
+            id: path.basename(finalPath),
+            path: `/media/${room}/${path.basename(finalPath)}`,
+            type: file.mimetype.startsWith('video/') ? 'video' : 'image',
+            duration: duration || roomConfigs[room].maxDuration,
+            timestamp: Date.now(),
+            userId: req.user._id,  // Add user ID to track who uploaded the file
+            username: req.user.username  // Add username for display
+        };
+
+        // Add to room's media queue
+        addToMediaQueue(room, mediaItem);
+
+        console.log(`Media uploaded by user ${req.user.username} to room ${room}:`, mediaItem);
+        res.json({ 
+            message: 'File uploaded successfully', 
+            mediaItem,
+            queue: getRoomMediaQueue(room)
+        });
+
+    } catch (error) {
+        console.error('Upload error:', error);
+        // Clean up files if they exist
+        const cleanup = async () => {
+            if (originalFile) await safeDeleteFile(originalFile);
+            if (trimmedFile) await safeDeleteFile(trimmedFile);
+        };
+        await cleanup();
+        res.status(500).json({ error: 'Upload failed', details: error.message });
+    }
+});
+
+// Get room's media queue
+app.get('/api/queue/:room', (req, res) => {
+    const room = req.params.room;
+    if (!isValidRoom(room)) {
+        return res.status(400).json({ error: 'Invalid room' });
+    }
+    res.json(getRoomMediaQueue(room));
+});
+
+// Serve media files
+app.get('/media/:room/:filename', (req, res) => {
+    const { room, filename } = req.params;
+    
+    // Validate room and filename
+    if (!isValidRoom(room)) {
+        return res.status(404).json({ error: 'Room not found' });
+    }
+
+    const filePath = path.join(uploadsDir, room, filename);
+    if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ error: 'File not found' });
+    }
+
+    res.sendFile(filePath);
+});
+
+// Cleanup system configuration
+const CLEANUP_CONFIG = {
+    INTERVAL: 60 * 60 * 1000, // 1 hour
+    MAX_AGE: 24 * 60 * 60 * 1000, // 24 hours
+    MAX_CONCURRENT_DELETES: 5,
+    MAX_RETRIES: 3,
+    RETRY_DELAY: 5000, // 5 seconds
+};
+
+// Track cleanup state
+let isCleanupRunning = false;
+const failedDeletes = new Map(); // Map<string, {retries: number, lastAttempt: number}>
+
+// Utility to handle failed deletes
+const handleFailedDelete = (filePath, error) => {
+    const failed = failedDeletes.get(filePath) || { retries: 0, lastAttempt: 0 };
+    failed.retries += 1;
+    failed.lastAttempt = Date.now();
+    failed.lastError = error.message;
+    
+    if (failed.retries < CLEANUP_CONFIG.MAX_RETRIES) {
+        failedDeletes.set(filePath, failed);
+        console.warn(`File deletion failed for ${filePath}, will retry later. Attempt ${failed.retries}/${CLEANUP_CONFIG.MAX_RETRIES}`);
+    } else {
+        failedDeletes.delete(filePath);
+        console.error(`File deletion permanently failed for ${filePath} after ${CLEANUP_CONFIG.MAX_RETRIES} attempts:`, error);
+        // Here you could implement additional alerting for persistent failures
+    }
+};
+
+// Process files in batches
+const processBatch = async (files, roomDir, allActiveFiles) => {
+    const batch = files.slice(0, CLEANUP_CONFIG.MAX_CONCURRENT_DELETES);
+    const remaining = files.slice(CLEANUP_CONFIG.MAX_CONCURRENT_DELETES);
+    
+    await Promise.all(batch.map(async file => {
+        const filePath = path.join(roomDir, file);
+        
+        // Skip active files
+        if (allActiveFiles.includes(file)) {
+            console.log(`Skipping active file: ${file}`);
+            return;
+        }
+
+        try {
+            const stats = await fs.promises.stat(filePath);
+            const age = Date.now() - stats.mtimeMs;
+            
+            if (age > CLEANUP_CONFIG.MAX_AGE) {
+                await safeDeleteFile(filePath);
+                console.log(`Deleted old file: ${filePath}`);
+                failedDeletes.delete(filePath); // Clear from failed deletes if it was there
+            }
+        } catch (error) {
+            console.error(`Error processing file ${filePath}:`, error);
+            handleFailedDelete(filePath, error);
+        }
+    }));
+
+    if (remaining.length > 0) {
+        await processBatch(remaining, roomDir, allActiveFiles);
+    }
+};
+
+// Retry failed deletes
+const retryFailedDeletes = async () => {
+    for (const [filePath, failed] of failedDeletes.entries()) {
+        if (Date.now() - failed.lastAttempt < CLEANUP_CONFIG.RETRY_DELAY) {
+            continue;
+        }
+
+        try {
+            await safeDeleteFile(filePath);
+            console.log(`Successfully deleted previously failed file: ${filePath}`);
+            failedDeletes.delete(filePath);
+        } catch (error) {
+            handleFailedDelete(filePath, error);
+        }
+    }
+};
+
+// Main cleanup function
+const cleanupOldFiles = async () => {
+    if (isCleanupRunning) {
+        console.log('Cleanup already in progress, skipping this run');
+        return;
+    }
+
+    try {
+        isCleanupRunning = true;
+        console.log('Running media cleanup...');
+
+        // First retry any previously failed deletes
+        await retryFailedDeletes();
+
+        // Then process each room
+        for (const room of Object.keys(roomConfigs)) {
+            const roomDir = path.join(uploadsDir, room);
+            
+            try {
+                const files = await fs.promises.readdir(roomDir);
+                const allActiveFiles = [
+                    ...roomConfigs[room].mediaQueue.map(item => item.id),
+                    ...roomConfigs[room].mediaQueue.map(id => 'trimmed-' + id)
+                ];
+                
+                await processBatch(files, roomDir, allActiveFiles);
+            } catch (error) {
+                console.error(`Error processing room ${room}:`, error);
+            }
+        }
+    } finally {
+        isCleanupRunning = false;
+    }
+};
+
+// Start the cleanup interval
+setInterval(cleanupOldFiles, CLEANUP_CONFIG.INTERVAL);
+
+// Export the cleanup function for manual triggering if needed
+export { cleanupOldFiles };
+
+// Helper functions for chat and media state
+const getChatHistory = async (roomName) => {
+    try {
+        const room = await Room.findOne({ name: roomName });
+        if (!room) {
+            console.warn(`Room ${roomName} not found`);
+            return [];
+        }
+        return room.lastMessages.map(msg => ({
+            id: msg._id.toString(),
+            username: msg.username,
+            text: msg.text,
+            timestamp: msg.createdAt
+        }));
+    } catch (error) {
+        console.error('Error getting chat history:', error);
+        return [];
+    }
+};
+
+const getMediaState = (roomName) => {
+    const config = roomConfigs[roomName];
+    if (!config) {
+        console.warn(`Room ${roomName} not found`);
+        return { media: null, queue: [] };
+    }
+    
+    return {
+        media: config.currentMedia || null,
+        queue: config.mediaQueue || []
+    };
+};
+
+const saveChatMessage = async (roomName, message) => {
+    try {
+        const chatMessage = new ChatMessage({
+            room: roomName,
+            username: message.user,
+            text: message.content,
+            createdAt: message.timestamp
+        });
+        
+        await chatMessage.save();
+        
+        // Update room's last messages
+        await Room.updateOne(
+            { name: roomName },
+            { 
+                $push: { 
+                    lastMessages: { 
+                        $each: [chatMessage],
+                        $slice: -50  // Keep last 50 messages
+                    }
+                }
+            }
+        );
+        
+        return chatMessage;
+    } catch (error) {
+        console.error('Error saving chat message:', error);
+        throw error;
+    }
+};
+
+const generateId = () => uuidv4();
+
+// Socket.IO connection handling
+io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+        return next(new Error('Authentication token required'));
+    }
+
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        socket.user = decoded;
+        next();
+    } catch (err) {
+        next(new Error('Invalid token'));
+    }
+});
+
+io.on('connection', (socket) => {
+    console.log('Client connected:', socket.id);
+    let currentRoom = null;
+
+    socket.on('room_change', async (room) => {
+        try {
+            if (currentRoom) {
+                socket.leave(currentRoom);
+            }
+            socket.join(room);
+            currentRoom = room;
+            socket.emit('room_changed', { room });
+            
+            // Send chat history
+            const chatHistory = await getChatHistory(room);
+            socket.emit('chat_history', { messages: chatHistory });
+            
+            // Start media playback if not already running
+            if (!roomConfigs[room].processingQueue) {
+                await startMediaPlayback(room);
+            }
+            
+            // Send current media state after attempting to start playback
+            const mediaState = getMediaState(room);
+            socket.emit('media_state', mediaState);
+        } catch (error) {
+            console.error('Error handling room change:', error);
+            socket.emit('error', { message: 'Failed to change room' });
+        }
+    });
+
+    socket.on('chat_message', async (message) => {
+        try {
+            if (!currentRoom) {
+                socket.emit('error', { message: 'Not in a room' });
+                return;
+            }
+            
+            const chatMessage = {
+                id: generateId(),
+                user: socket.user.username,
+                content: message.content,
+                timestamp: new Date().toISOString()
+            };
+            
+            await saveChatMessage(currentRoom, chatMessage);
+            io.to(currentRoom).emit('chat_message', chatMessage);
+        } catch (error) {
+            console.error('Error handling chat message:', error);
+            socket.emit('error', { message: 'Failed to send message' });
+        }
+    });
+
+    socket.on('disconnect', () => {
+        console.log('Client disconnected:', socket.id);
+    });
+});
 
 // Connect to MongoDB Atlas
 const MONGODB_URI = process.env.MONGODB_URI || 'your_mongodb_atlas_uri';
@@ -500,8 +1101,6 @@ mongoose.connect(MONGODB_URI, {
 
 // Log all MongoDB operations in development
 mongoose.set('debug', true);
-
-app.use(express.json());
 
 // Store WebSocket clients with their user info
 // Update user's IP address
@@ -543,592 +1142,12 @@ const generateGuestUsername = async () => {
   return username;
 };
 
-// Authentication middleware
-const auth = async (req, res, next) => {
-  try {
-      const token = req.header('Authorization')?.replace('Bearer ', '');
-      if (!token) {
-          throw new Error();
-      }
-
-      const decoded = jwt.verify(token, JWT_SECRET);
-      const user = await User.findById(decoded.userId);
-      
-      if (!user) {
-          throw new Error();
-      }
-
-      req.user = user;
-      req.token = token;
-      next();
-  } catch (error) {
-      res.status(401).json({ error: 'Please authenticate' });
-  }
-};
-
-// Sign up route
-app.post('/auth/signup', [
-  check('username').isLength({ min: 3 }).trim().escape(),
-  check('password').isLength({ min: 6 })
-], async (req, res) => {
-  try {
-      console.log('Signup attempt:', { username: req.body.username });
-      
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-          console.log('Validation errors:', errors.array());
-          return res.status(400).json({ errors: errors.array() });
-      }
-
-      const { username, password } = req.body;
-      const ip = getClientIp(req);
-
-      // Check if username exists
-      const existingUser = await User.findOne({ username });
-      if (existingUser) {
-          console.log('Username already exists:', username);
-          return res.status(400).json({ error: 'Username already exists' });
-      }
-
-      // Hash password
-      const hashedPassword = await bcrypt.hash(password, 10);
-
-      // Create user
-      const user = new User({
-          username,
-          password: hashedPassword,
-          ipAddresses: [{ ip, lastUsed: new Date() }]
-      });
-
-      console.log('Attempting to save user:', username);
-      const savedUser = await user.save();
-      console.log('User saved successfully:', savedUser._id);
-
-      // Generate token
-      const token = jwt.sign({ userId: user._id }, JWT_SECRET);
-
-      res.status(201).json({ token, user: { id: user._id, username: user.username } });
-  } catch (error) {
-      console.error('Signup error:', error);
-      res.status(500).json({ error: 'Error creating user', details: error.message });
-  }
-});
-
-// Login route
-app.post('/auth/login', async (req, res) => {
-  try {
-      const { username, password } = req.body;
-
-      // Find user
-      const user = await User.findOne({ username });
-      if (!user || user.isGuest) {
-          return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      // Check password
-      const isMatch = await bcrypt.compare(password, user.password);
-      if (!isMatch) {
-          return res.status(401).json({ error: 'Invalid credentials' });
-      }
-
-      // Generate token
-      const token = jwt.sign({ userId: user._id }, JWT_SECRET);
-
-      res.json({ token, user: { id: user._id, username: user.username } });
-  } catch (error) {
-      res.status(500).json({ error: 'Error logging in' });
-  }
-});
-
-// Guest login route
-app.post('/auth/guest', async (req, res) => {
-  try {
-      const username = await generateGuestUsername();
-      const ip = getClientIp(req);
-      
-      // Create guest user
-      const user = new User({
-          username,
-          isGuest: true,
-          ipAddresses: [{ ip, lastUsed: new Date() }]
-      });
-
-      await user.save();
-
-      // Generate token
-      const token = jwt.sign({ userId: user._id }, JWT_SECRET);
-
-      res.json({ token, user: { id: user._id, username: user.username } });
-  } catch (error) {
-      res.status(500).json({ error: 'Error creating guest user' });
-  }
-});
-
-// Get current user
-app.get('/auth/user', auth, async (req, res) => {
-  res.json({ user: { id: req.user._id, username: req.user.username } });
-});
-
-// Get chat history
-app.get('/chat/history', auth, async (req, res) => {
-  try {
-      const messages = await ChatMessage.find({})
-          .sort({ createdAt: -1 })
-          .limit(50);
-      res.json(messages.reverse());
-  } catch (error) {
-      res.status(500).json({ error: 'Error fetching chat history' });
-  }
-});
-
-// Get user stats
-app.get('/user/stats', auth, async (req, res) => {
-  try {
-      const user = await User.findById(req.user._id);
-      const messageCount = await ChatMessage.countDocuments({ userId: req.user._id });
-      
-      res.json({
-          username: user.username,
-          messageCount,
-          ipAddresses: user.ipAddresses,
-          lastActive: user.lastActive,
-          createdAt: user.createdAt
-      });
-  } catch (error) {
-      res.status(500).json({ error: 'Error fetching user stats' });
-  }
-});
-
-// Handle file uploads
-app.post('/upload/:room', upload.single('file'), async (req, res) => {
-    let originalFile = null;
-    let trimmedFile = null;
-
-    try {
-        const room = req.params.room;
-        const file = req.file;
-
-        if (!file) {
-            return res.status(400).json({ error: 'No file uploaded' });
-        }
-
-        originalFile = file.path;
-
-        // Check if it's a valid room
-        if (!isValidRoom(room)) {
-            safeDeleteFile(originalFile);
-            return res.status(400).json({ error: 'Invalid room' });
-        }
-
-        // Get file duration if it's a video
-        let duration = 0;
-        let finalPath = file.path;
-
-        if (file.mimetype.startsWith('video/')) {
-            try {
-                const metadata = await getVideoMetadata(file.path);
-                duration = metadata.format.duration;
-                console.log(`Original video duration: ${duration}s`);
-
-                // Always trim videos in duration-limited rooms
-                if (room !== 'home' && duration > roomConfigs[room].maxDuration) {
-                    console.log(`Trimming video from ${duration}s to ${roomConfigs[room].maxDuration}s`);
-                    const trimmedPath = path.join(
-                        path.dirname(file.path),
-                        'trimmed-' + path.basename(file.path)
-                    );
-                    
-                    await trimVideo(file.path, trimmedPath, roomConfigs[room].maxDuration);
-                    trimmedFile = trimmedPath;
-                    finalPath = trimmedPath;
-                    duration = roomConfigs[room].maxDuration;
-                    console.log(`Video trimmed successfully. New duration: ${duration}s`);
-
-                    // Delete original file after successful trim
-                    console.log('Deleting original file after trim:', originalFile);
-                    safeDeleteFile(originalFile);
-                    originalFile = null;
-                } else {
-                    console.log(`Video duration (${duration}s) within limits for room ${room}`);
-                }
-            } catch (error) {
-                console.error('Error processing video:', error);
-                safeDeleteFile(originalFile);
-                if (trimmedFile) safeDeleteFile(trimmedFile);
-                return res.status(400).json({ error: 'Failed to process video' });
-            }
-        }
-
-        // Create media item
-        const mediaItem = {
-            id: path.basename(finalPath),
-            path: `/media/${room}/${path.basename(finalPath)}`,
-            type: file.mimetype.startsWith('video/') ? 'video' : 'image',
-            duration: duration || roomConfigs[room].maxDuration,
-            timestamp: Date.now()
-        };
-
-        // Add to room's media queue
-        addToMediaQueue(room, mediaItem);
-
-        console.log(`Media uploaded to room ${room}:`, mediaItem);
-        res.json({ 
-            message: 'File uploaded successfully', 
-            mediaItem,
-            queue: getRoomMediaQueue(room)
-        });
-
-    } catch (error) {
-        console.error('Upload error:', error);
-        // Clean up files if they exist
-        if (originalFile) safeDeleteFile(originalFile);
-        if (trimmedFile) safeDeleteFile(trimmedFile);
-        res.status(500).json({ error: 'Upload failed' });
-    }
-});
-
-// Get room's media queue
-app.get('/queue/:room', (req, res) => {
-    const room = req.params.room;
-    if (!isValidRoom(room)) {
-        return res.status(400).json({ error: 'Invalid room' });
-    }
-    res.json(getRoomMediaQueue(room));
-});
-
-// Serve media files
-app.get('/media/:room/:filename', (req, res) => {
-    const { room, filename } = req.params;
-    
-    // Validate room and filename
-    if (!isValidRoom(room)) {
-        return res.status(404).json({ error: 'Room not found' });
-    }
-
-    const filePath = path.join(uploadsDir, room, filename);
-    if (!fs.existsSync(filePath)) {
-        return res.status(404).json({ error: 'File not found' });
-    }
-
-    res.sendFile(filePath);
-});
-
-// Clean up old media files periodically (every hour)
-const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
-setInterval(() => {
-    console.log('Running media cleanup...');
-    Object.keys(roomConfigs).forEach(room => {
-        const roomDir = path.join(uploadsDir, room);
-        if (!fs.existsSync(roomDir)) return;
-
-        fs.readdir(roomDir, (err, files) => {
-            if (err) {
-                console.error(`Error reading directory ${roomDir}:`, err);
-                return;
-            }
-
-            const now = Date.now();
-            const activeFiles = roomConfigs[room].mediaQueue.map(item => item.id);
-            const activeTrimmedFiles = activeFiles.map(id => 'trimmed-' + id);
-            const allActiveFiles = [...activeFiles, ...activeTrimmedFiles];
-
-            files.forEach(file => {
-                const filePath = path.join(roomDir, file);
-                
-                // Skip files that are currently in the queue
-                if (allActiveFiles.includes(file)) {
-                    console.log(`Skipping active file: ${file}`);
-                    return;
-                }
-
-                fs.stat(filePath, (err, stats) => {
-                    if (err) {
-                        console.error(`Error getting stats for ${filePath}:`, err);
-                        return;
-                    }
-
-                    // Delete files older than 24 hours
-                    const age = now - stats.mtimeMs;
-                    if (age > 24 * 60 * 60 * 1000) {
-                        fs.unlink(filePath, err => {
-                            if (err) {
-                                console.error(`Error deleting old file ${filePath}:`, err);
-                            } else {
-                                console.log(`Deleted old file: ${filePath}`);
-                            }
-                        });
-                    }
-                });
-            });
-        });
+// Initialize media queues and start server
+initializeServer().then(() => {
+    server.listen(port, () => {
+        console.log(`Server running on port ${port}`);
     });
-}, CLEANUP_INTERVAL);
-
-// Serve static files from uploads directory
-app.use('/media', express.static(uploadsDir));
-
-// WebSocket connection handling
-wss.on('connection', async (ws, req) => {
-    const clientIp = getClientIp(req);
-    let currentRoom = 'home';  // Default room
-    let currentUser = null;
-
-    // Add client to clients map
-    const clientId = uuidv4();
-    clients.set(clientId, { ws, room: currentRoom });
-    ws.clientId = clientId;
-
-    // Mark connection as alive
-    ws.isAlive = true;
-    ws.on('pong', () => {
-        ws.isAlive = true;
-        console.log(`Received pong from client ${clientId}`);
-    });
-
-    // Send ping every 30 seconds
-    const pingInterval = setInterval(() => {
-        if (ws.isAlive === false) {
-            console.log(`Client ${clientId} timed out, terminating connection`);
-            clearInterval(pingInterval);
-            clients.delete(clientId);
-            return ws.terminate();
-        }
-        ws.isAlive = false;
-        try {
-            ws.ping();
-        } catch (error) {
-            console.error(`Error sending ping to client ${clientId}:`, error);
-            clearInterval(pingInterval);
-            clients.delete(clientId);
-            ws.terminate();
-        }
-    }, 30000);
-
-    // Send initial connection confirmation
-    try {
-        ws.send(JSON.stringify({
-            type: 'connected',
-            clientId: clientId
-        }));
-    } catch (error) {
-        console.error(`Error sending connection confirmation to client ${clientId}:`, error);
-    }
-
-    ws.on('message', async (data) => {
-        try {
-            const messageStr = data instanceof Buffer ? data.toString() : data;
-            const message = JSON.parse(messageStr);
-            
-            console.log(`Received message from client ${clientId}:`, message);
-
-            if (message.type === 'auth') {
-                try {
-                    if (!message.token) {
-                        throw new Error('No token provided');
-                    }
-
-                    const decoded = jwt.verify(message.token, JWT_SECRET);
-                    const user = await User.findById(decoded.userId);
-                    
-                    if (!user) {
-                        ws.send(JSON.stringify({ type: 'error', error: 'User not found' }));
-                        return;
-                    }
-
-                    currentUser = user;
-                    console.log(`Client ${clientId} authenticated as ${user.username}`);
-                    
-                    // Send success response
-                    ws.send(JSON.stringify({ type: 'auth_success' }));
-
-                    // Update user's last active time
-                    await User.updateOne(
-                        { _id: user._id },
-                        { 
-                            $set: { lastActive: new Date() },
-                            $addToSet: { 
-                                ipAddresses: {
-                                    ip: clientIp,
-                                    lastUsed: new Date()
-                                }
-                            }
-                        }
-                    );
-                } catch (err) {
-                    console.error('Auth error:', err);
-                    ws.send(JSON.stringify({
-                        type: 'error', 
-                        error: 'Authentication failed: ' + (err.message || 'Unknown error')
-                    }));
-                }
-            } else if (message.type === 'room_change') {
-                try {
-                    if (!message.room || !isValidRoom(message.room)) {
-                        throw new Error('Invalid room');
-                    }
-
-                    // Update client's room in the map
-                    const client = clients.get(clientId);
-                    if (client) {
-                        const oldRoom = client.room;
-                        client.room = message.room;
-                        currentRoom = message.room;
-                        console.log(`Client ${clientId} moved from ${oldRoom} to ${currentRoom}`);
-
-                        // Clear any existing media state when leaving a room
-                        broadcastToRoom(oldRoom, {
-                            type: 'media_state',
-                            media: null,
-                            queue: []
-                        });
-
-                        // Send room join confirmation
-                        ws.send(JSON.stringify({
-                            type: 'room_changed',
-                            room: currentRoom
-                        }));
-
-                        // Start fresh media playback for the new room if there's media
-                        if (roomConfigs[currentRoom].mediaQueue?.length > 0) {
-                            // Clear any existing timer for this room
-                            if (roomConfigs[currentRoom].timer) {
-                                clearTimeout(roomConfigs[currentRoom].timer);
-                                roomConfigs[currentRoom].timer = null;
-                            }
-                            startMediaPlayback(currentRoom);
-                        }
-
-                        // Get room's chat history
-                        const room = await Room.findOne({ name: currentRoom });
-                        if (room && room.lastMessages) {
-                            console.log(`Sending ${room.lastMessages.length} messages to client ${clientId}`);
-                            ws.send(JSON.stringify({
-                                type: 'chat_history',
-                                messages: room.lastMessages.map(msg => ({
-                                    id: msg._id.toString(),
-                                    username: msg.username,
-                                    text: msg.text,
-                                    timestamp: msg.createdAt
-                                }))
-                            }));
-                        }
-                    }
-                } catch (error) {
-                    console.error('Room change error:', error);
-                    ws.send(JSON.stringify({
-                        type: 'error',
-                        message: error.message
-                    }));
-                }
-            } else if (message.type === 'chat_message') {
-                try {
-                    if (!currentRoom) {
-                        throw new Error('Not in a room');
-                    }
-
-                    const room = await Room.findOne({ name: currentRoom });
-                    if (!room) {
-                        throw new Error('Room not found');
-                    }
-
-                    // Create chat message with only required fields
-                    const chatMessage = new ChatMessage({
-                        room: currentRoom,
-                        username: currentUser?.username || 'Anonymous',
-                        text: message.text
-                    });
-
-                    // Add optional fields if available
-                    if (currentUser?._id) {
-                        chatMessage.userId = currentUser._id;
-                    }
-                    if (req.socket?.remoteAddress) {
-                        chatMessage.ip = req.socket.remoteAddress;
-                    }
-
-                    await chatMessage.save();
-
-                    // Update room's last messages
-                    await Room.updateOne(
-                        { _id: room._id },
-                        { $push: { 
-                            lastMessages: { 
-                                $each: [chatMessage],
-                                $slice: -50  // Keep last 50 messages
-                            }
-                        }}
-                    );
-
-                    // Broadcast to room
-                    broadcastToRoom(currentRoom, {
-                        type: 'chat_message',
-                        id: chatMessage._id.toString(),
-                        username: chatMessage.username,
-                        text: chatMessage.text,
-                        timestamp: chatMessage.createdAt
-                    });
-
-                } catch (error) {
-                    console.error('Chat message error:', error);
-                    ws.send(JSON.stringify({
-                        type: 'error',
-                        message: error.message
-                    }));
-                }
-            } else if (message.type === 'request_next_media') {
-                try {
-                    console.log(`Client ${clientId} requested next media in room ${currentRoom}`);
-                    const nextMedia = getNextMedia(currentRoom);
-                    if (nextMedia) {
-                        console.log(`Playing next media in room ${currentRoom}:`, nextMedia);
-                        startMediaPlayback(currentRoom);
-                    } else {
-                        console.log(`No more media in queue for room ${currentRoom}`);
-                        broadcastToRoom(currentRoom, {
-                            type: 'media_state',
-                            media: null,
-                            queue: []
-                        });
-                    }
-                } catch (error) {
-                    console.error('Error handling next media request:', error);
-                    ws.send(JSON.stringify({
-                        type: 'error',
-                        message: 'Failed to play next media'
-                    }));
-                }
-            }
-        } catch (err) {
-            console.error(`Error handling message from client ${clientId}:`, err);
-            try {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ 
-                        type: 'error', 
-                        message: err.message 
-                    }));
-                }
-            } catch (sendError) {
-                console.error(`Error sending error message to client ${clientId}:`, sendError);
-            }
-        }
-    });
-
-    // Handle client disconnect
-    ws.on('close', () => {
-        console.log(`Client ${clientId} disconnected from room: ${currentRoom}`);
-        clearInterval(pingInterval);
-        clients.delete(clientId);
-    });
-});
-
-// Clean up on server shutdown
-process.on('SIGTERM', () => {
-    clearInterval(PING_INTERVAL);
-    Object.keys(roomConfigs).forEach(room => {
-        if (room.cycleInterval) {
-            clearInterval(room.cycleInterval);
-        }
-    });
-    wss.close();
-    server.close();
+}).catch(error => {
+    console.error('Server initialization failed:', error);
+    process.exit(1);
 });
