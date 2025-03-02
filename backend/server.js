@@ -19,6 +19,8 @@ import Room from './models/Room.js';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from '@ffmpeg-installer/ffmpeg';
 import ffprobePath from '@ffprobe-installer/ffprobe';
+import { rateLimiter, authRateLimiter, userDataRateLimiter, uploadsRateLimiter, securityHeaders, sanitizeInput, corsOptions } from './src/middleware/security.js';
+import config from './src/config/index.js';
 
 // ES Module compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -48,13 +50,14 @@ const clients = new Map();
 const mediaQueues = {};
 const uploadsDir = path.join(__dirname, 'uploads');
 
+// Apply security middleware
+app.use(securityHeaders);
+app.use(sanitizeInput);
+// Apply general rate limiter as default
+app.use(rateLimiter);
+
 // Configure CORS
-app.use(cors({
-    origin: 'http://localhost:3000',
-    methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true
-}));
+app.use(cors(corsOptions));
 
 // Create HTTP server and Socket.IO instance
 const server = createServer(app);
@@ -402,14 +405,6 @@ const safeDeleteFile = async (filePath) => {
     }
 };
 
-// Configure CORS
-app.use(cors({
-  origin: 'http://localhost:3000',
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  credentials: true
-}));
-
 // Initialize rooms in database
 const initializeRooms = async () => {
     try {
@@ -437,7 +432,7 @@ const initializeRooms = async () => {
 // Configure multer for file uploads
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        const room = req.params.room;
+        const room = req.params.roomName;
         const roomDir = path.join(uploadsDir, room);
         
         // Create room directory if it doesn't exist
@@ -519,7 +514,7 @@ const auth = async (req, res, next) => {
 };
 
 // Sign up route
-app.post('/api/auth/signup', [
+app.post('/api/auth/signup', authRateLimiter, [
     check('username').isLength({ min: 3 }).trim().escape(),
     check('password').isLength({ min: 6 })
 ], async (req, res) => {
@@ -572,7 +567,10 @@ app.post('/api/auth/signup', [
 });
 
 // Login route
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', authRateLimiter, [
+    check('username').trim().escape(),
+    check('password').exists()
+], async (req, res) => {
     try {
         const { username, password } = req.body;
 
@@ -634,7 +632,7 @@ app.post('/api/auth/guest', async (req, res) => {
 });
 
 // Refresh token route
-app.post('/api/auth/refresh', async (req, res) => {
+app.post('/api/auth/refresh', authRateLimiter, async (req, res) => {
     try {
         const { refreshToken } = req.body;
         if (!refreshToken) {
@@ -663,8 +661,8 @@ app.post('/api/auth/refresh', async (req, res) => {
     }
 });
 
-// Get current user
-app.get('/api/auth/user', auth, async (req, res) => {
+// Get current user - apply user data rate limiter
+app.get('/api/auth/user', userDataRateLimiter, auth, async (req, res) => {
     res.json({ user: { id: req.user._id, username: req.user.username } });
 });
 
@@ -699,12 +697,12 @@ app.get('/api/user/stats', auth, async (req, res) => {
 });
 
 // Handle file uploads
-app.post('/api/upload/:room', auth, upload.single('file'), async (req, res) => {
+app.post('/api/upload/:roomName', uploadsRateLimiter, auth, upload.single('file'), async (req, res) => {
     let originalFile = null;
     let trimmedFile = null;
 
     try {
-        const room = req.params.room;
+        const room = req.params.roomName;
         const file = req.file;
 
         if (!file) {
@@ -798,8 +796,8 @@ app.post('/api/upload/:room', auth, upload.single('file'), async (req, res) => {
 });
 
 // Get room's media queue
-app.get('/api/queue/:room', (req, res) => {
-    const room = req.params.room;
+app.get('/api/queue/:roomName', (req, res) => {
+    const room = req.params.roomName;
     if (!isValidRoom(room)) {
         return res.status(400).json({ error: 'Invalid room' });
     }
@@ -807,15 +805,15 @@ app.get('/api/queue/:room', (req, res) => {
 });
 
 // Serve media files
-app.get('/media/:room/:filename', (req, res) => {
-    const { room, filename } = req.params;
+app.get('/media/:roomName/:filename', (req, res) => {
+    const { roomName, filename } = req.params;
     
     // Validate room and filename
-    if (!isValidRoom(room)) {
+    if (!isValidRoom(roomName)) {
         return res.status(404).json({ error: 'Room not found' });
     }
 
-    const filePath = path.join(uploadsDir, room, filename);
+    const filePath = path.join(uploadsDir, roomName, filename);
     if (!fs.existsSync(filePath)) {
         return res.status(404).json({ error: 'File not found' });
     }
@@ -980,14 +978,20 @@ const getMediaState = (roomName) => {
 
 const saveChatMessage = async (roomName, message) => {
     try {
+        console.log('saveChatMessage called with roomName:', roomName);
+        console.log('saveChatMessage called with message:', message);
+        
         const chatMessage = new ChatMessage({
             room: roomName,
-            username: message.user,
+            username: message.username,
             text: message.content,
             createdAt: message.timestamp
         });
         
-        await chatMessage.save();
+        console.log('ChatMessage model created:', chatMessage);
+        
+        const savedMessage = await chatMessage.save();
+        console.log('ChatMessage saved successfully:', savedMessage);
         
         // Update room's last messages
         await Room.updateOne(
@@ -995,14 +999,14 @@ const saveChatMessage = async (roomName, message) => {
             { 
                 $push: { 
                     lastMessages: { 
-                        $each: [chatMessage],
+                        $each: [savedMessage],
                         $slice: -50  // Keep last 50 messages
                     }
                 }
             }
         );
         
-        return chatMessage;
+        return savedMessage;
     } catch (error) {
         console.error('Error saving chat message:', error);
         throw error;
@@ -1012,7 +1016,7 @@ const saveChatMessage = async (roomName, message) => {
 const generateId = () => uuidv4();
 
 // Socket.IO connection handling
-io.use((socket, next) => {
+io.use(async (socket, next) => {
     const token = socket.handshake.auth.token;
     if (!token) {
         return next(new Error('Authentication token required'));
@@ -1020,7 +1024,19 @@ io.use((socket, next) => {
 
     try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        socket.user = decoded;
+        
+        // Fetch the user from the database to get the username
+        const user = await User.findById(decoded.userId);
+        if (!user) {
+            return next(new Error('User not found'));
+        }
+        
+        // Add both userId and username to the socket.user object
+        socket.user = {
+            userId: decoded.userId,
+            username: user.username
+        };
+        
         next();
     } catch (err) {
         next(new Error('Invalid token'));
@@ -1065,15 +1081,29 @@ io.on('connection', (socket) => {
                 return;
             }
             
+            console.log('Received chat message:', message);
+            console.log('Socket user object:', socket.user);
+            
+            // Create a message object with the fields expected by the ChatMessage model
             const chatMessage = {
                 id: generateId(),
-                user: socket.user.username,
+                username: socket.user.username,
                 content: message.content,
                 timestamp: new Date().toISOString()
             };
             
-            await saveChatMessage(currentRoom, chatMessage);
-            io.to(currentRoom).emit('chat_message', chatMessage);
+            console.log('Prepared chat message for saving:', chatMessage);
+            
+            // Save the message to the database
+            const savedMessage = await saveChatMessage(currentRoom, chatMessage);
+            
+            // Emit the saved message with the field names expected by the frontend
+            io.to(currentRoom).emit('chat_message', {
+                id: savedMessage._id || chatMessage.id,
+                username: savedMessage.username,
+                text: savedMessage.text,
+                timestamp: savedMessage.createdAt || chatMessage.timestamp
+            });
         } catch (error) {
             console.error('Error handling chat message:', error);
             socket.emit('error', { message: 'Failed to send message' });

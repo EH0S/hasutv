@@ -1,11 +1,18 @@
+
+Queue max size / 10 s = 720
+Queue max size / 30 s = 240
+Queue max size / 60 s = 120
+
+
+
 PRE-PRODUCTION CHECKLIST
 ====================
 
 1. CRITICAL SECURITY (High Priority)
 ----------------------------------
- Move sensitive credentials from .env to secure environment variable management
+ Move sensitive credentials from .env to secure environment variable management Done
  Implement rate limiting for API abuse prevention
- Configure CORS with specific allowed origins
+ Configure CORS with specific allowed origins Done
  Add input sanitization for XSS prevention
  Implement CSP headers
 
