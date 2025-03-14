@@ -28,46 +28,113 @@ const VideoPlayer = ({ room }) => {
     const [timeUntilNext, setTimeUntilNext] = useState(roomConfigs[room].countdown);
     const mediaRef = useRef(null);
     const timerRef = useRef(null);
+    const mountedRef = useRef(true);
+    const mediaStateTimerRef = useRef(null);
+    const lastProcessedTimestampRef = useRef(0);
+
+    // Set mounted ref to false when component unmounts
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => {
+            mountedRef.current = false;
+        };
+    }, []);
 
     useEffect(() => {
         if (!socket) return;
+
+        // Clear any existing media state timer
+        if (mediaStateTimerRef.current) {
+            clearTimeout(mediaStateTimerRef.current);
+            mediaStateTimerRef.current = null;
+        }
 
         // Join room when component mounts or room changes
         emit('room_change', room);
 
         const handleRoomChanged = (data) => {
+            if (!mountedRef.current) return;
             console.log('Room changed to:', data.room);
             setCurrentMedia(null);
             setPlaying(false);
-            setLoading(false);
+            setLoading(true);
+            lastProcessedTimestampRef.current = 0;
         };
 
         const handleMediaState = (data) => {
+            if (!mountedRef.current) return;
             console.log('Received media state:', data);
-            if (data.media) {
-                setCurrentMedia(data.media);
-                setPlaying(true);
-                setLoading(false);
+            
+            // Process media state if it has a timestamp newer than the last one we processed
+            // or if it has media and we haven't processed any media yet
+            const timestamp = data.timestamp || Date.now();
+            
+            if (timestamp > lastProcessedTimestampRef.current || 
+                (data.media && !currentMedia)) {
+                
+                console.log('Processing media state with timestamp:', timestamp);
+                lastProcessedTimestampRef.current = timestamp;
+                
+                if (data.media) {
+                    console.log('Setting current media:', data.media);
+                    setCurrentMedia(data.media);
+                    setPlaying(true);
+                    setLoading(false);
+                    
+                    // Set up periodic media state requests
+                    scheduleNextMediaStateRequest();
+                } else {
+                    console.log('No media in state, clearing current media');
+                    setCurrentMedia(null);
+                    setPlaying(false);
+                    setLoading(false);
+                }
             } else {
-                setCurrentMedia(null);
-                setPlaying(false);
-                setLoading(false);
+                console.log('Ignoring older or duplicate media state');
             }
+        };
+        
+        const scheduleNextMediaStateRequest = () => {
+            // Clear any existing timer
+            if (mediaStateTimerRef.current) {
+                clearTimeout(mediaStateTimerRef.current);
+            }
+            
+            // Set up a new timer to request media state
+            mediaStateTimerRef.current = setTimeout(() => {
+                if (mountedRef.current && socket) {
+                    console.log('Requesting media state update');
+                    emit('request_media_state');
+                }
+            }, roomConfigs[room].interval || 30000);
         };
 
         // Set up event listeners
         socket.on('room_changed', handleRoomChanged);
         socket.on('media_state', handleMediaState);
 
-        // Cleanup listeners when component unmounts or room changes
+        // Cleanup listeners when component unmounts or room/socket changes
         return () => {
-            socket.off('room_changed', handleRoomChanged);
-            socket.off('media_state', handleMediaState);
+            if (socket) {
+                socket.off('room_changed', handleRoomChanged);
+                socket.off('media_state', handleMediaState);
+            }
+            
+            // Clear any timers
+            if (timerRef.current) {
+                clearInterval(timerRef.current);
+                timerRef.current = null;
+            }
+            
+            if (mediaStateTimerRef.current) {
+                clearTimeout(mediaStateTimerRef.current);
+                mediaStateTimerRef.current = null;
+            }
         };
     }, [socket, room, emit]);
 
     useEffect(() => {
-        if (currentMedia) {
+        if (currentMedia && mountedRef.current) {
             // Reset timer
             setTimeUntilNext(roomConfigs[room].countdown);
             
@@ -78,21 +145,25 @@ const VideoPlayer = ({ room }) => {
 
             // Start new countdown
             timerRef.current = setInterval(() => {
-                setTimeUntilNext(prev => {
-                    if (prev <= 0) return roomConfigs[room].countdown;
-                    return prev - 1;
-                });
+                if (mountedRef.current) {
+                    setTimeUntilNext(prev => {
+                        if (prev <= 0) return roomConfigs[room].countdown;
+                        return prev - 1;
+                    });
+                }
             }, 1000);
 
             return () => {
                 if (timerRef.current) {
                     clearInterval(timerRef.current);
+                    timerRef.current = null;
                 }
             };
         }
     }, [currentMedia, room]);
 
     const handleMediaEnd = () => {
+        // Request next media
         emit('request_next_media');
     };
 
@@ -110,17 +181,36 @@ const VideoPlayer = ({ room }) => {
         );
     }
 
+    // Log the media that we're trying to render
+    console.log('Rendering media:', currentMedia);
+    
+    // Construct the full URL for the media
+    const mediaUrl = `http://localhost:3001${currentMedia.path}`;
+    console.log('Media URL:', mediaUrl);
+
+    // Determine if the media is an image based on type or file extension
+    const isImage = currentMedia.type === 'image' || 
+                   (currentMedia.path && 
+                    /\.(jpg|jpeg|png|gif|bmp|webp)$/i.test(currentMedia.path));
+    
+    console.log('Media type detection:', { 
+        declaredType: currentMedia.type,
+        isImage,
+        path: currentMedia.path
+    });
+
     return (
         <div className="relative w-full h-full bg-black">
             <div className="aspect-w-16 aspect-h-9 w-full h-full">
-                {currentMedia.type === 'video' ? (
+                {!isImage ? (
                     <ReactPlayer
                         ref={mediaRef}
-                        url={`http://localhost:3001${currentMedia.path}`}
+                        url={mediaUrl}
                         width="100%"
                         height="100%"
-                        playing={true}
+                        playing={playing}
                         volume={volume}
+                        loop={true}
                         onProgress={({ played }) => setProgress(played)}
                         onEnded={handleMediaEnd}
                         onError={(error) => {
@@ -136,15 +226,20 @@ const VideoPlayer = ({ room }) => {
                         }}
                     />
                 ) : (
-                    <img
-                        src={`http://localhost:3001${currentMedia.path}`}
-                        alt="Media content"
-                        className="w-full h-full object-contain"
-                        onError={() => setError('Failed to load image')}
-                        onLoad={() => {
-                            setTimeout(handleMediaEnd, roomConfigs[room].interval || 30000);
-                        }}
-                    />
+                    <div className="w-full h-full flex items-center justify-center">
+                        <img
+                            src={mediaUrl}
+                            alt="Media content"
+                            className="max-w-full max-h-full object-contain"
+                            onError={(e) => {
+                                console.error('Image load error:', e);
+                                setError('Failed to load image');
+                            }}
+                            onLoad={() => {
+                                console.log('Image loaded successfully');
+                            }}
+                        />
+                    </div>
                 )}
             </div>
             <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/50 to-transparent">

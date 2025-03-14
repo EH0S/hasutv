@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { io } from 'socket.io-client';
 import { useAuth } from './AuthContext';
 
@@ -7,9 +7,17 @@ const SocketContext = createContext();
 export const SocketProvider = ({ children }) => {
     const [socket, setSocket] = useState(null);
     const { token } = useAuth();
+    const socketRef = useRef(null);
 
     useEffect(() => {
         if (!token) return;
+
+        // Clean up existing socket before creating a new one
+        if (socketRef.current) {
+            console.log('Disconnecting existing socket before creating new one');
+            socketRef.current.disconnect();
+            socketRef.current = null;
+        }
 
         const newSocket = io('http://localhost:3001', {
             auth: { token },
@@ -32,11 +40,15 @@ export const SocketProvider = ({ children }) => {
             console.log('Socket disconnected:', reason);
         });
 
+        // Store socket in ref for cleanup
+        socketRef.current = newSocket;
         setSocket(newSocket);
 
         return () => {
-            if (newSocket) {
-                newSocket.disconnect();
+            if (socketRef.current) {
+                console.log('Cleaning up socket on unmount');
+                socketRef.current.disconnect();
+                socketRef.current = null;
             }
         };
     }, [token]);
