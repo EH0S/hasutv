@@ -14,7 +14,17 @@ const roomConfigs = {
     '60-second-room': {
         interval: 60000,     // 60 seconds
         countdown: 60
+    },
+    'home': {
+        interval: 30000,    // default 30 seconds
+        countdown: 30
     }
+};
+
+// Default config for fallback
+const defaultConfig = {
+    interval: 30000,
+    countdown: 30
 };
 
 const VideoPlayer = ({ room }) => {
@@ -25,12 +35,18 @@ const VideoPlayer = ({ room }) => {
     const [playing, setPlaying] = useState(true);
     const [volume, setVolume] = useState(0.8);
     const [progress, setProgress] = useState(0);
-    const [timeUntilNext, setTimeUntilNext] = useState(roomConfigs[room].countdown);
+    
+    // Safely access roomConfigs with fallback to default
+    const roomConfig = roomConfigs[room] || defaultConfig;
+    const [timeUntilNext, setTimeUntilNext] = useState(roomConfig.countdown);
+    
     const mediaRef = useRef(null);
     const timerRef = useRef(null);
     const mountedRef = useRef(true);
     const mediaStateTimerRef = useRef(null);
     const lastProcessedTimestampRef = useRef(0);
+    const lastProcessedSequenceNumberRef = useRef(0); // Track the last processed sequence number
+    const lastClientIdRef = useRef(null); // Track the last received clientId
 
     // Set mounted ref to false when component unmounts
     useEffect(() => {
@@ -49,6 +65,10 @@ const VideoPlayer = ({ room }) => {
             mediaStateTimerRef.current = null;
         }
 
+        // Reset sequence number tracking when changing rooms
+        lastProcessedSequenceNumberRef.current = 0;
+        lastClientIdRef.current = null; // Reset clientId tracking
+
         // Join room when component mounts or room changes
         emit('room_change', room);
 
@@ -59,27 +79,56 @@ const VideoPlayer = ({ room }) => {
             setPlaying(false);
             setLoading(true);
             lastProcessedTimestampRef.current = 0;
+            lastProcessedSequenceNumberRef.current = 0; // Reset sequence number on room change
+            lastClientIdRef.current = null; // Reset clientId tracking
         };
 
         const handleMediaState = (data) => {
             if (!mountedRef.current) return;
             console.log('Received media state:', data);
             
-            // Process media state if it has a timestamp newer than the last one we processed
-            // or if it has media and we haven't processed any media yet
+            // Get sequence number with fallback to 0 if not present (for backward compatibility)
+            const sequenceNumber = data.sequenceNumber || 0;
             const timestamp = data.timestamp || Date.now();
+            const clientId = data.clientId || null;
             
-            if (timestamp > lastProcessedTimestampRef.current || 
-                (data.media && !currentMedia)) {
+            // Check if this is a duplicate update from the same client
+            const isDuplicate = 
+                (sequenceNumber === lastProcessedSequenceNumberRef.current && 
+                Math.abs(timestamp - lastProcessedTimestampRef.current) < 500) || // Within 500ms
+                (clientId && clientId === lastClientIdRef.current && 
+                Math.abs(timestamp - lastProcessedTimestampRef.current) < 1000); // Same client within 1s
+            
+            if (isDuplicate) {
+                console.log(`Ignoring duplicate media state update: seq=${sequenceNumber}, timestamp=${timestamp}, clientId=${clientId}`);
+                return;
+            }
+            
+            // Check if this update has a higher sequence number than the last one we processed
+            // If sequence numbers are equal, use timestamp as a tiebreaker
+            const isNewerSequence = sequenceNumber > lastProcessedSequenceNumberRef.current;
+            const isSameSequenceNewerTimestamp = 
+                sequenceNumber === lastProcessedSequenceNumberRef.current && 
+                timestamp > lastProcessedTimestampRef.current + 1000; // Only consider significantly newer timestamps
+            
+            if (isNewerSequence || isSameSequenceNewerTimestamp || (!currentMedia && data.media)) {
+                console.log(`Processing media state with sequence number: ${sequenceNumber} (previous: ${lastProcessedSequenceNumberRef.current})`);
                 
-                console.log('Processing media state with timestamp:', timestamp);
+                // Update the last processed sequence number, timestamp, and clientId
+                lastProcessedSequenceNumberRef.current = sequenceNumber;
                 lastProcessedTimestampRef.current = timestamp;
+                if (clientId) {
+                    lastClientIdRef.current = clientId;
+                }
                 
                 if (data.media) {
                     console.log('Setting current media:', data.media);
                     setCurrentMedia(data.media);
                     setPlaying(true);
                     setLoading(false);
+                    
+                    // Reset countdown timer
+                    setTimeUntilNext(roomConfig.countdown);
                     
                     // Set up periodic media state requests
                     scheduleNextMediaStateRequest();
@@ -90,7 +139,7 @@ const VideoPlayer = ({ room }) => {
                     setLoading(false);
                 }
             } else {
-                console.log('Ignoring older or duplicate media state');
+                console.log(`Ignoring outdated media state with sequence number: ${sequenceNumber} (current: ${lastProcessedSequenceNumberRef.current})`);
             }
         };
         
@@ -106,7 +155,7 @@ const VideoPlayer = ({ room }) => {
                     console.log('Requesting media state update');
                     emit('request_media_state');
                 }
-            }, roomConfigs[room].interval || 30000);
+            }, roomConfig.interval || 30000);
         };
 
         // Set up event listeners
@@ -131,12 +180,12 @@ const VideoPlayer = ({ room }) => {
                 mediaStateTimerRef.current = null;
             }
         };
-    }, [socket, room, emit]);
+    }, [socket, room, emit, roomConfig.interval]);
 
     useEffect(() => {
         if (currentMedia && mountedRef.current) {
             // Reset timer
-            setTimeUntilNext(roomConfigs[room].countdown);
+            setTimeUntilNext(roomConfig.countdown);
             
             // Clear existing interval
             if (timerRef.current) {
@@ -147,7 +196,7 @@ const VideoPlayer = ({ room }) => {
             timerRef.current = setInterval(() => {
                 if (mountedRef.current) {
                     setTimeUntilNext(prev => {
-                        if (prev <= 0) return roomConfigs[room].countdown;
+                        if (prev <= 0) return roomConfig.countdown;
                         return prev - 1;
                     });
                 }
@@ -160,7 +209,7 @@ const VideoPlayer = ({ room }) => {
                 }
             };
         }
-    }, [currentMedia, room]);
+    }, [currentMedia, roomConfig.countdown]);
 
     const handleMediaEnd = () => {
         // Request next media
@@ -200,69 +249,49 @@ const VideoPlayer = ({ room }) => {
     });
 
     return (
-        <div className="relative w-full h-full bg-black">
-            <div className="aspect-w-16 aspect-h-9 w-full h-full">
-                {!isImage ? (
+        <div className="relative w-full h-full flex items-center justify-center">
+            {/* Countdown display */}
+            <div className="absolute top-4 right-4 bg-black bg-opacity-70 text-white px-2 py-1 rounded-lg text-sm">
+                Next: {timeUntilNext}s
+            </div>
+            
+            {isImage ? (
+                // Image display
+                <div className="flex items-center justify-center w-full h-full">
+                    <img
+                        src={mediaUrl}
+                        alt="Media content"
+                        className="max-w-full max-h-full object-contain"
+                    />
+                </div>
+            ) : (
+                // Video player
+                <div className="w-full h-full">
                     <ReactPlayer
                         ref={mediaRef}
                         url={mediaUrl}
+                        playing={playing}
+                        controls={true}
+                        volume={volume}
                         width="100%"
                         height="100%"
-                        playing={playing}
-                        volume={volume}
-                        loop={true}
-                        onProgress={({ played }) => setProgress(played)}
                         onEnded={handleMediaEnd}
-                        onError={(error) => {
-                            console.error('Player error:', error);
-                            setError('Failed to load video');
+                        onError={(e) => {
+                            console.error('Player error:', e);
+                            setError('Error playing media. Please try again.');
                         }}
+                        loop={true}
                         config={{
                             file: {
                                 attributes: {
-                                    crossOrigin: 'anonymous'
+                                    controlsList: 'nodownload',
+                                    disablePictureInPicture: true,
                                 }
                             }
                         }}
                     />
-                ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                        <img
-                            src={mediaUrl}
-                            alt="Media content"
-                            className="max-w-full max-h-full object-contain"
-                            onError={(e) => {
-                                console.error('Image load error:', e);
-                                setError('Failed to load image');
-                            }}
-                            onLoad={() => {
-                                console.log('Image loaded successfully');
-                            }}
-                        />
-                    </div>
-                )}
-            </div>
-            <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/50 to-transparent">
-                <div className="flex items-center justify-between text-white">
-                    <div className="text-sm">
-                        Next media in: {Math.ceil(timeUntilNext)}s
-                    </div>
-                    <div className="flex items-center space-x-2">
-                        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                            <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z" clipRule="evenodd" />
-                        </svg>
-                        <input
-                            type="range"
-                            min={0}
-                            max={1}
-                            step={0.1}
-                            value={volume}
-                            onChange={(e) => setVolume(parseFloat(e.target.value))}
-                            className="w-24"
-                        />
-                    </div>
                 </div>
-            </div>
+            )}
         </div>
     );
 };

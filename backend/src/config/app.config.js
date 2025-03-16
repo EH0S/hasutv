@@ -6,7 +6,8 @@ export const roomConfigs = {
         mediaQueue: [],
         currentMedia: null,
         processingQueue: false,
-        timer: null
+        timer: null,
+        sequenceNumber: 0  // Track media state updates
     },
     '10-second-room': {
         interval: 10000,  // 10 seconds
@@ -14,7 +15,8 @@ export const roomConfigs = {
         mediaQueue: [],
         currentMedia: null,
         processingQueue: false,
-        timer: null
+        timer: null,
+        sequenceNumber: 0  // Track media state updates
     },
     '30-second-room': {
         interval: 30000,  // 30 seconds
@@ -22,7 +24,8 @@ export const roomConfigs = {
         mediaQueue: [],
         currentMedia: null,
         processingQueue: false,
-        timer: null
+        timer: null,
+        sequenceNumber: 0  // Track media state updates
     },
     '60-second-room': {
         interval: 60000,  // 60 seconds
@@ -30,7 +33,8 @@ export const roomConfigs = {
         mediaQueue: [],
         currentMedia: null,
         processingQueue: false,
-        timer: null
+        timer: null,
+        sequenceNumber: 0  // Track media state updates
     }
 };
 

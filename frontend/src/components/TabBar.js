@@ -1,10 +1,21 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const TabBar = ({ currentRoom, onRoomChange, onHomeClick }) => {
+const TabBar = ({ currentRoom }) => {
+    const navigate = useNavigate();
+
+    const handleRoomChange = (room) => {
+        navigate(`/${room}`);
+    };
+
+    const handleHomeClick = () => {
+        navigate('/');
+    };
+
     return (
         <div className="flex flex-col pt-6 space-y-6">
             <button
-                onClick={onHomeClick}
+                onClick={handleHomeClick}
                 className={`flex flex-col items-center justify-center ${
                     !currentRoom ? 'text-blue-500' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300'
                 }`}
@@ -15,7 +26,7 @@ const TabBar = ({ currentRoom, onRoomChange, onHomeClick }) => {
                 <span className="text-xs mt-1.5">Home</span>
             </button>
             <button
-                onClick={() => onRoomChange('10-second-room')}
+                onClick={() => handleRoomChange('10-second-room')}
                 className={`flex flex-col items-center justify-center ${
                     currentRoom === '10-second-room' ? 'text-blue-500' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300'
                 }`}
@@ -26,7 +37,7 @@ const TabBar = ({ currentRoom, onRoomChange, onHomeClick }) => {
                 <span className="text-xs mt-1.5">10s</span>
             </button>
             <button
-                onClick={() => onRoomChange('30-second-room')}
+                onClick={() => handleRoomChange('30-second-room')}
                 className={`flex flex-col items-center justify-center ${
                     currentRoom === '30-second-room' ? 'text-blue-500' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300'
                 }`}
@@ -37,7 +48,7 @@ const TabBar = ({ currentRoom, onRoomChange, onHomeClick }) => {
                 <span className="text-xs mt-1.5">30s</span>
             </button>
             <button
-                onClick={() => onRoomChange('60-second-room')}
+                onClick={() => handleRoomChange('60-second-room')}
                 className={`flex flex-col items-center justify-center ${
                     currentRoom === '60-second-room' ? 'text-blue-500' : 'text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-300'
                 }`}

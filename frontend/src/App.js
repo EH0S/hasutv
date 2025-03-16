@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Routes, Route, useParams, useNavigate, Navigate } from 'react-router-dom';
 import TabBar from './components/TabBar';
 import VideoPlayer from './components/VideoPlayer';
 import VideoDescription from './components/VideoDescription';
@@ -32,12 +33,14 @@ const ThemeToggle = () => {
     );
 };
 
-const AppContent = () => {
-    const [currentRoom, setCurrentRoom] = useState(null);
+// Room component that handles individual room display
+const Room = () => {
+    const { roomName } = useParams();
     const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
     const [isDrawingModalOpen, setIsDrawingModalOpen] = useState(false);
     const [uploading, setUploading] = useState(false);
     const { token } = useAuth();
+    const navigate = useNavigate();
 
     useEffect(() => {
         const handleResize = () => {
@@ -49,11 +52,11 @@ const AppContent = () => {
     }, []);
 
     const handleRoomChange = (room) => {
-        setCurrentRoom(room);
+        navigate(`/${room}`);
     };
 
     const handleHomeClick = () => {
-        setCurrentRoom(null);
+        navigate('/');
     };
 
     const handleDrawingClick = () => {
@@ -71,7 +74,7 @@ const AppContent = () => {
         formData.append('file', drawingFile);
 
         try {
-            const response = await fetch(`http://localhost:3001/api/upload/${currentRoom || 'home'}`, {
+            const response = await fetch(`http://localhost:3001/api/upload/${roomName}`, {
                 method: 'POST',
                 body: formData,
                 headers: {
@@ -95,6 +98,93 @@ const AppContent = () => {
     };
 
     return (
+        <div className="h-[calc(100vh-48px)] md:h-[calc(100vh-64px)] relative">
+            {/* Drawing Modal */}
+            <DrawingModal
+                isOpen={isDrawingModalOpen}
+                onClose={() => setIsDrawingModalOpen(false)}
+                onSave={handleDrawingSave}
+                uploading={uploading}
+            />
+            {/* Mobile Layout */}
+            <div className="md:hidden flex flex-col h-full">
+                {/* Video Player */}
+                <div className="w-full">
+                    <div className="aspect-video w-full">
+                        {isMobile && <VideoPlayer room={roomName} />}
+                    </div>
+                </div>
+
+                {/* Video Description for Mobile */}
+                <div className="w-full bg-black">
+                    <VideoDescription 
+                        room={roomName} 
+                        isDrawingModalOpen={isDrawingModalOpen}
+                        onDrawingModalClose={handleDrawingClick}
+                    />
+                </div>
+
+                {/* Chat for Mobile */}
+                <div className="flex-1 min-h-0 border-t border-gray-800 bg-black relative">
+                    <div className="absolute inset-0 flex flex-col">
+                        <div className="flex-1 overflow-y-auto">
+                            <Chat room={roomName} />
+                        </div>
+                        <div className="h-[48px]"></div>
+                    </div>
+                </div>
+
+                {/* Mobile Navigation */}
+                <div className="fixed bottom-0 left-0 right-0 h-[50px] md:h-[48px] z-40 bg-gray-900 border-t border-gray-800">
+                    <MobileNavBar currentRoom={roomName} />
+                </div>
+            </div>
+
+            {/* Desktop Layout */}
+            <div className="hidden md:flex h-full">
+                {/* Left Sidebar - Menu */}
+                <div className="w-16 lg:w-20 border-r border-gray-800 bg-black">
+                    <TabBar currentRoom={roomName} />
+                </div>
+
+                {/* Main Content Area */}
+                <div className="flex-1 flex flex-col">
+                    <div className="w-full h-[40vh] bg-black">
+                        <div className="h-full flex items-center justify-center">
+                            {!isMobile && <VideoPlayer room={roomName} />}
+                        </div>
+                    </div>
+                    <div className="flex-1 p-4 overflow-auto bg-black">
+                        <VideoDescription 
+                            room={roomName} 
+                            isDrawingModalOpen={isDrawingModalOpen}
+                            onDrawingModalClose={handleDrawingClick}
+                        />
+                    </div>
+                </div>
+
+                {/* Chat Panel */}
+                <div className="w-[300px] lg:w-[400px] border-l border-gray-800 bg-black">
+                    <Chat room={roomName} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// HomePage component that wraps the Home component
+const HomePage = () => {
+    const navigate = useNavigate();
+    
+    const handleRoomChange = (room) => {
+        navigate(`/${room}`);
+    };
+    
+    return <Home onRoomChange={handleRoomChange} />;
+};
+
+const AppContent = () => {
+    return (
         <div className="flex flex-col min-h-screen bg-black max-w-screen overflow-hidden">
             {/* Animated background */}
             <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-gray-900 via-black to-black opacity-80" />
@@ -103,7 +193,7 @@ const AppContent = () => {
             <div className="sticky top-0 z-20 bg-black border-b border-gray-800">
                 <div className="flex justify-between items-center px-3 h-12 md:h-16 md:px-4">
                     <div className="flex items-center space-x-4">
-                        <div className="text-lg md:text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 cursor-pointer">
+                        <div onClick={() => window.location.href = '/'} className="text-lg md:text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-500 via-purple-500 to-pink-500 cursor-pointer">
                             Hasu
                         </div>
                     </div>
@@ -115,106 +205,22 @@ const AppContent = () => {
 
             {/* Main Content */}
             <div className="flex-1 relative">
-                {currentRoom ? (
-                    <div className="h-[calc(100vh-48px)] md:h-[calc(100vh-64px)] relative">
-                        {/* Drawing Modal */}
-                        <DrawingModal
-                            isOpen={isDrawingModalOpen}
-                            onClose={() => setIsDrawingModalOpen(false)}
-                            onSave={handleDrawingSave}
-                            uploading={uploading}
-                        />
-                        {/* Mobile Layout */}
-                        <div className="md:hidden flex flex-col h-full">
-                            {/* Video Player */}
-                            <div className="w-full">
-                                <div className="aspect-video w-full">
-                                    {isMobile && <VideoPlayer room={currentRoom} />}
-                                </div>
-                            </div>
-
-                            {/* Video Description for Mobile */}
-                            <div className="w-full bg-black">
-                                <VideoDescription 
-                                    room={currentRoom} 
-                                    isDrawingModalOpen={isDrawingModalOpen}
-                                    onDrawingModalClose={handleDrawingClick}
-                                />
-                            </div>
-
-                            {/* Chat for Mobile */}
-                            <div className="flex-1 min-h-0 border-t border-gray-800 bg-black relative">
-                                <div className="absolute inset-0 flex flex-col">
-                                    <div className="flex-1 overflow-y-auto">
-                                        <Chat room={currentRoom} />
-                                    </div>
-                                    <div className="h-[48px]"></div>
-                                </div>
-                            </div>
-
-                            {/* Mobile Navigation */}
-                            <div className="fixed bottom-0 left-0 right-0 h-[50px] md:h-[48px] z-40 bg-gray-900 border-t border-gray-800">
-                                <MobileNavBar currentRoom={currentRoom} onRoomChange={handleRoomChange} />
-                            </div>
-                        </div>
-
-                        {/* Desktop Layout */}
-                        <div className="hidden md:flex h-full">
-                            {/* Left Sidebar - Menu */}
-                            <div className="w-16 lg:w-20 border-r border-gray-800 bg-black">
-                                <TabBar 
-                                    currentRoom={currentRoom} 
-                                    onRoomChange={handleRoomChange}
-                                    onHomeClick={handleHomeClick}
-                                />
-                            </div>
-
-                            {/* Main Content Area */}
-                            <div className="flex-1 flex flex-col">
-                                <div className="w-full h-[40vh] bg-black">
-                                    <div className="h-full flex items-center justify-center">
-                                        {!isMobile && <VideoPlayer room={currentRoom} />}
-                                    </div>
-                                </div>
-                                <div className="flex-1 p-4 overflow-auto bg-black">
-                                    <VideoDescription 
-                                        room={currentRoom} 
-                                        isDrawingModalOpen={isDrawingModalOpen}
-                                        onDrawingModalClose={handleDrawingClick}
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Chat Panel */}
-                            <div className="w-[300px] lg:w-[400px] border-l border-gray-800 bg-black">
-                                <Chat room={currentRoom} />
-                            </div>
-                        </div>
-                    </div>
-                ) : (
-                    <Home onRoomChange={handleRoomChange} />
-                )}
+                <Routes>
+                    <Route path="/" element={<HomePage />} />
+                    <Route path="/:roomName" element={<Room />} />
+                    <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
             </div>
         </div>
     );
 };
 
 const App = () => {
-    const [isDrawingModalOpen, setIsDrawingModalOpen] = useState(false);
-
-    const handleDrawingClick = () => {
-        setIsDrawingModalOpen(true);
-    };
-
     return (
         <ThemeProvider>
             <AuthProvider>
                 <SocketProvider>
-                    <AppContent 
-                        isDrawingModalOpen={isDrawingModalOpen}
-                        onDrawingModalClose={() => setIsDrawingModalOpen(false)}
-                        onDrawingClick={handleDrawingClick}
-                    />
+                    <AppContent />
                 </SocketProvider>
             </AuthProvider>
         </ThemeProvider>

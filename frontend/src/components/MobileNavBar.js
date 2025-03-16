@@ -1,10 +1,17 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
-const MobileNavBar = ({ currentRoom, onRoomChange }) => {
+const MobileNavBar = ({ currentRoom }) => {
+    const navigate = useNavigate();
+
+    const handleRoomChange = (room) => {
+        navigate(`/${room}`);
+    };
+
     return (
         <div className="h-full flex items-center justify-around px-4 md:px-8">
             <button
-                onClick={() => onRoomChange(null)}
+                onClick={() => handleRoomChange('')}
                 className={`flex flex-col items-center ${!currentRoom ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'}`}
             >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -13,7 +20,7 @@ const MobileNavBar = ({ currentRoom, onRoomChange }) => {
                 <span className="text-xs mt-0.5">Home</span>
             </button>
             <button
-                onClick={() => onRoomChange('10-second-room')}
+                onClick={() => handleRoomChange('10-second-room')}
                 className={`flex flex-col items-center ${currentRoom === '10-second-room' ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'}`}
             >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -22,7 +29,7 @@ const MobileNavBar = ({ currentRoom, onRoomChange }) => {
                 <span className="text-xs mt-0.5">10s</span>
             </button>
             <button
-                onClick={() => onRoomChange('30-second-room')}
+                onClick={() => handleRoomChange('30-second-room')}
                 className={`flex flex-col items-center ${currentRoom === '30-second-room' ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'}`}
             >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -31,7 +38,7 @@ const MobileNavBar = ({ currentRoom, onRoomChange }) => {
                 <span className="text-xs mt-0.5">30s</span>
             </button>
             <button
-                onClick={() => onRoomChange('60-second-room')}
+                onClick={() => handleRoomChange('60-second-room')}
                 className={`flex flex-col items-center ${currentRoom === '60-second-room' ? 'text-blue-500' : 'text-gray-500 dark:text-gray-400'}`}
             >
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

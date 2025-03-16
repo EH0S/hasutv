@@ -60,10 +60,19 @@ export const SocketProvider = ({ children }) => {
                 if (emit.roomChangeTimeout) {
                     clearTimeout(emit.roomChangeTimeout);
                 }
+                
+                // Add tracking to prevent duplicate room changes
+                if (emit.lastRoom === data) {
+                    console.log(`Ignoring duplicate room change to ${data}`);
+                    return;
+                }
+                
                 emit.roomChangeTimeout = setTimeout(() => {
+                    console.log(`Emitting debounced room change to ${data}`);
                     socket.emit(eventName, data);
+                    emit.lastRoom = data;
                     emit.roomChangeTimeout = null;
-                }, 300); // 300ms debounce
+                }, 500); // Increased debounce time from 300ms to 500ms
             } else {
                 socket.emit(eventName, data);
             }

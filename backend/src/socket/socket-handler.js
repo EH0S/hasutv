@@ -3,6 +3,7 @@ import User from '../../models/User.js';
 import { generateId } from '../utils/auth-utils.js';
 import { getChatHistory, saveChatMessage } from '../services/message.service.js';
 import { getMediaState, startMediaPlayback } from '../services/media.service.js';
+import { roomConfigs } from '../config/app.config.js';
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -42,6 +43,12 @@ export const configureSocketHandlers = (io) => {
 
         socket.on('room_change', async (room) => {
             try {
+                // Prevent no-op room changes
+                if (currentRoom === room) {
+                    console.log(`Client ${socket.id} already in room ${room}, ignoring duplicate room change`);
+                    return;
+                }
+
                 if (currentRoom) {
                     socket.leave(currentRoom);
                 }
@@ -53,14 +60,22 @@ export const configureSocketHandlers = (io) => {
                 const chatHistory = await getChatHistory(room);
                 socket.emit('chat_history', { messages: chatHistory });
                 
-                // Start media playback if not already running
-                await startMediaPlayback(io, room);
+                // Start media playback if not already running, but don't broadcast
+                // This prevents duplicate media state updates when joining a room
+                let mediaStateEmitted = false;
                 
-                // Send current media state after attempting to start playback
-                const mediaState = getMediaState(room);
-                mediaState.timestamp = Date.now();
-                console.log('Sending initial media state after room change:', mediaState);
-                socket.emit('media_state', mediaState);
+                if (!roomConfigs[room].processingQueue) {
+                    await startMediaPlayback(io, room);
+                    mediaStateEmitted = true; // The startMediaPlayback already emitted to the room
+                }
+                
+                // Only send media state separately if it wasn't already emitted by startMediaPlayback
+                if (!mediaStateEmitted) {
+                    // Send current media state directly to this client only
+                    const mediaState = getMediaState(room, socket.id);
+                    console.log(`Sending initial media state to client ${socket.id} for room ${room}:`, mediaState);
+                    socket.emit('media_state', mediaState);
+                }
             } catch (error) {
                 console.error('Error handling room change:', error);
                 socket.emit('error', { message: 'Failed to change room' });
@@ -74,7 +89,7 @@ export const configureSocketHandlers = (io) => {
                 return;
             }
             
-            const mediaState = getMediaState(currentRoom);
+            const mediaState = getMediaState(currentRoom, socket.id);
             mediaState.timestamp = Date.now();
             console.log('Sending media state in response to request:', mediaState);
             socket.emit('media_state', mediaState);

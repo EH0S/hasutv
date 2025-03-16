@@ -8,15 +8,17 @@ import { dirname } from 'path';
 import { PORT } from './src/config/app.config.js';
 import { connectDatabase } from './src/config/db.config.js';
 import { configureSocketHandlers } from './src/socket/socket-handler.js';
-import { initializeServer } from './src/services/room.service.js';
-import { cleanupOldFiles } from './src/services/cleanup.service.js';
+import { initializeServer, cleanupOldFiles } from './src/services/index.js';
 import { CLEANUP_CONFIG } from './src/config/app.config.js';
-import { securityHeaders, sanitizeInput, corsOptions, rateLimiter, uploadsRateLimiter } from './src/middleware/security.js';
+import { 
+  securityHeaders, 
+  sanitizeInput, 
+  corsOptions, 
+  rateLimiter
+} from './src/middleware/index.js';
 
-// Import routes
-import authRoutes from './src/routes/auth.routes.js';
-import chatRoutes from './src/routes/chat.routes.js';
-import mediaRoutes from './src/routes/media.routes.js';
+// Import the main router
+import apiRoutes from './src/routes/index.js';
 
 // ES Module compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -63,22 +65,57 @@ app.set('io', io);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Register routes
-app.use('/api/auth', authRoutes);
-app.use('/api/chat', chatRoutes);
-app.use('/api/media', mediaRoutes);
+// Register API routes with prefix
+app.use('/api', apiRoutes);
+
 // Backward compatibility for direct media access
-app.use('/media', mediaRoutes);  
+app.use('/media', (req, res, next) => {
+  req.url = '/media' + req.url;
+  apiRoutes(req, res, next);
+});
 
-// Backward compatibility for old upload endpoint - direct implementation
-import { uploadMiddleware } from './src/middleware/upload.js';
-import { uploadMedia } from './src/controllers/media.controller.js';
-import { auth } from './src/middleware/auth.js';
-
-app.post('/api/upload/:roomName', uploadsRateLimiter, auth, uploadMiddleware, uploadMedia);
+// Room configurations
+const roomConfigs = {
+    'home': {
+        interval: 30000,  // 30 seconds
+        maxDuration: 30,  // 30 seconds
+        mediaQueue: [],
+        currentMedia: null,
+        processingQueue: false,
+        timer: null,
+        sequenceNumber: 0  // Add sequence number for tracking media state updates
+    },
+    '10-second-room': {
+        interval: 10000,  // 10 seconds
+        maxDuration: 10,  // 10 seconds
+        mediaQueue: [],
+        currentMedia: null,
+        processingQueue: false,
+        timer: null,
+        sequenceNumber: 0  // Add sequence number for tracking media state updates
+    },
+    '30-second-room': {
+        interval: 30000,  // 30 seconds
+        maxDuration: 30,  // 30 seconds
+        mediaQueue: [],
+        currentMedia: null,
+        processingQueue: false,
+        timer: null,
+        sequenceNumber: 0  // Add sequence number for tracking media state updates
+    },
+    '60-second-room': {
+        interval: 60000,  // 60 seconds
+        maxDuration: 60,  // 60 seconds
+        mediaQueue: [],
+        currentMedia: null,
+        processingQueue: false,
+        timer: null,
+        sequenceNumber: 0  // Add sequence number for tracking media state updates
+    }
+};
 
 // Configure Socket.IO
-configureSocketHandlers(io);
+configureSocketHandlers(io, roomConfigs);
 
 // Start the cleanup interval
 setInterval(cleanupOldFiles, CLEANUP_CONFIG.INTERVAL);

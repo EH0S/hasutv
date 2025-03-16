@@ -21,7 +21,8 @@ export const getNextMedia = async (io, room) => {
         io.to(room).emit('media_state', {
             media: null,
             queue: [],
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            sequenceNumber: roomConfigs[room]?.sequenceNumber || 0
         });
         return;
     }
@@ -33,10 +34,14 @@ export const getNextMedia = async (io, room) => {
     if (queue.length === 0) {
         console.log('Queue is empty');
         roomConfigs[room].currentMedia = null;
+        // Increment sequence number when media state changes to empty
+        roomConfigs[room].sequenceNumber += 1;
+        console.log(`Incremented sequence number to ${roomConfigs[room].sequenceNumber} (empty queue)`);
         io.to(room).emit('media_state', {
             media: null,
             queue: [],
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            sequenceNumber: roomConfigs[room].sequenceNumber
         });
         return;
     }
@@ -52,8 +57,18 @@ export const getNextMedia = async (io, room) => {
     const currentMedia = queue[0];
     console.log('Current media:', currentMedia);
 
+    // Check if this is a new media item
+    const isNewMedia = !roomConfigs[room].currentMedia || 
+                      roomConfigs[room].currentMedia.id !== currentMedia.id;
+
     // Update room's current media
     roomConfigs[room].currentMedia = currentMedia;
+    
+    // Increment sequence number for new media
+    if (isNewMedia) {
+        roomConfigs[room].sequenceNumber += 1;
+        console.log(`Incremented sequence number to ${roomConfigs[room].sequenceNumber} (new media)`);
+    }
 
     // Verify the media file exists before proceeding
     const mediaPath = path.join(uploadsDir, room, currentMedia.id);
@@ -67,11 +82,12 @@ export const getNextMedia = async (io, room) => {
         const remainingQueue = queue.slice(1);
         console.log('Remaining queue:', remainingQueue);
 
-        // Broadcast current media state
+        // Broadcast current media state with sequence number
         io.to(room).emit('media_state', {
             media: currentMedia,
             queue: remainingQueue,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            sequenceNumber: roomConfigs[room].sequenceNumber
         });
 
         // Set timer based on media duration
@@ -149,34 +165,98 @@ export const cleanupMediaFiles = async (room, mediaItem) => {
 
 // Start media playback for a room
 export const startMediaPlayback = async (io, room) => {
-    console.log('\n=== Starting media playback ===');
-    console.log(`Room: ${room}`);
-
     if (!roomConfigs[room]) {
-        console.log('Invalid room');
+        console.warn(`Room ${room} not found in startMediaPlayback`);
         return;
     }
 
+    // Avoid multiple concurrent queue processing
     if (roomConfigs[room].processingQueue) {
-        console.log('Already processing queue');
+        console.log(`Already processing queue for room ${room}`);
         return;
     }
 
-    roomConfigs[room].processingQueue = true;
-    const queue = roomConfigs[room].mediaQueue;
-    
-    if (!queue || queue.length === 0) {
-        console.log('No media in queue');
+    try {
+        console.log(`Starting media playback for room ${room}`);
+        roomConfigs[room].processingQueue = true;
+
+        // Check if a timer is already running
+        if (roomConfigs[room].timer) {
+            console.log(`Timer already running for room ${room}, clearing it`);
+            clearTimeout(roomConfigs[room].timer);
+            roomConfigs[room].timer = null;
+        }
+
+        // Get next media item
+        let nextMedia = null;
+        if (roomConfigs[room].currentMedia === null && roomConfigs[room].mediaQueue.length > 0) {
+            // Get the first item if nothing is currently playing
+            nextMedia = roomConfigs[room].mediaQueue[0];
+            console.log('Got first media from queue:', nextMedia);
+        } else if (roomConfigs[room].mediaQueue.length > 0) {
+            // Get next item
+            nextMedia = roomConfigs[room].mediaQueue[0];
+            console.log('Got next media from queue:', nextMedia);
+        } else if (roomConfigs[room].currentMedia !== null) {
+            // If queue is empty but we have currentMedia, keep playing it
+            console.log('Queue empty, continuing with current media:', roomConfigs[room].currentMedia);
+            nextMedia = roomConfigs[room].currentMedia;
+        }
+
+        // If no media available, reset state and return
+        if (!nextMedia) {
+            roomConfigs[room].currentMedia = null;
+            roomConfigs[room].sequenceNumber += 1;
+            console.log(`No media available for room ${room}, incrementing sequence number to ${roomConfigs[room].sequenceNumber}`);
+            // Use 'broadcast' as clientId for broadcasts to indicate this is a server broadcast
+            io.to(room).emit('media_state', getMediaState(room, 'broadcast'));
+            roomConfigs[room].processingQueue = false;
+            return;
+        }
+
+        // Update current media
+        const previousMedia = roomConfigs[room].currentMedia;
+        roomConfigs[room].currentMedia = nextMedia;
+        
+        // Increment sequence number if media has changed
+        if (previousMedia !== nextMedia) {
+            roomConfigs[room].sequenceNumber += 1;
+            console.log(`Media changed for room ${room}, incrementing sequence number to ${roomConfigs[room].sequenceNumber}`);
+        }
+
+        // Set timer based on media duration
+        const duration = nextMedia.duration || roomConfigs[room].maxDuration;
+        const switchInterval = Math.min(
+            duration * 1000,           // Convert duration to milliseconds
+            roomConfigs[room].interval // Room's max interval as fallback
+        );
+        console.log(`Setting timer for ${duration} seconds (${switchInterval}ms) in room ${room}`);
+        
+        // Start the timer to switch to next media after the interval
+        roomConfigs[room].timer = setTimeout(() => {
+            console.log(`\n=== Timer expired for room ${room} ===`);
+            
+            // Only remove media if there's more than one item in the queue
+            if (roomConfigs[room].mediaQueue.length > 1) {
+                const played = roomConfigs[room].mediaQueue.shift();
+                console.log('Removed played media:', played.id);
+                cleanupMediaFiles(room, played);
+            } else {
+                console.log('Only one media in queue - keeping it playing:', roomConfigs[room].mediaQueue[0].id);
+            }
+            
+            // Start the next playback cycle
+            startMediaPlayback(io, room);
+        }, switchInterval);
+
+        // Broadcast update to all clients in the room
+        // Use 'broadcast' as clientId for broadcasts to indicate this is a server broadcast
+        io.to(room).emit('media_state', getMediaState(room, 'broadcast'));
+    } catch (error) {
+        console.error('Error starting media playback:', error);
+    } finally {
         roomConfigs[room].processingQueue = false;
-        return;
     }
-
-    if (roomConfigs[room].timer) {
-        console.log('Playback already in progress');
-        return;
-    }
-
-    await getNextMedia(io, room);
 };
 
 // Add media to queue
@@ -215,18 +295,19 @@ export const getRoomMediaQueue = (room) => {
     return roomConfigs[room]?.mediaQueue || [];
 };
 
-// Get media state for a room
-export const getMediaState = (roomName) => {
-    const config = roomConfigs[roomName];
-    if (!config) {
-        console.warn(`Room ${roomName} not found`);
-        return { media: null, queue: [], timestamp: Date.now() };
+// Get the current media state for a room
+export const getMediaState = (room, clientId = null) => {
+    if (!roomConfigs[room]) {
+        return { media: null, queue: [], timestamp: Date.now(), sequenceNumber: 0 };
     }
     
+    // Add timestamp and sequence number to media state to help with duplicate detection
     return {
-        media: config.currentMedia || null,
-        queue: config.mediaQueue || [],
-        timestamp: Date.now()
+        media: roomConfigs[room].currentMedia,
+        queue: roomConfigs[room].mediaQueue,
+        timestamp: Date.now(),
+        sequenceNumber: roomConfigs[room].sequenceNumber,
+        clientId: clientId // Include client ID if provided
     };
 };
 
